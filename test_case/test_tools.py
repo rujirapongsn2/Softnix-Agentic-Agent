@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import httpx
+
 from softnix_agentic_agent.agent.executor import SafeActionExecutor
 
 
@@ -87,3 +89,24 @@ def test_run_safe_command_rejects_non_allowlisted(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert "allowlisted" in (result.error or "")
+
+
+def test_web_fetch_success(tmp_path: Path, monkeypatch) -> None:
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/plain"}
+        text = "hello from web"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def _fake_get(url, timeout, follow_redirects):  # type: ignore[no-untyped-def]
+        assert url == "https://example.com/data"
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    ex = _executor(tmp_path)
+    result = ex.execute({"name": "web_fetch", "params": {"url": "https://example.com/data"}})
+    assert result.ok is True
+    assert "status=200" in result.output
+    assert "hello from web" in result.output

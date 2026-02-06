@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from softnix_agentic_agent.cli import _run_stdout_mode
+from softnix_agentic_agent.cli import _run_stdout_mode, _should_use_stdout_mode
 from softnix_agentic_agent.config import Settings
 
 
@@ -24,3 +24,18 @@ def test_run_stdout_mode(monkeypatch) -> None:
         settings=Settings(workspace=Path(".")),
     )
     assert out == "<html>Hello</html>"
+
+
+def test_should_use_stdout_mode_when_workspace_not_set(monkeypatch) -> None:
+    monkeypatch.delenv("SOFTNIX_WORKSPACE", raising=False)
+    assert _should_use_stdout_mode(None) is True
+
+
+def test_should_not_use_stdout_mode_when_env_workspace_set(monkeypatch) -> None:
+    monkeypatch.setenv("SOFTNIX_WORKSPACE", "./tmp")
+    assert _should_use_stdout_mode(None) is False
+
+
+def test_should_not_use_stdout_mode_when_cli_workspace_set(monkeypatch) -> None:
+    monkeypatch.delenv("SOFTNIX_WORKSPACE", raising=False)
+    assert _should_use_stdout_mode(Path("./tmp")) is False

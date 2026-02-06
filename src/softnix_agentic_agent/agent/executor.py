@@ -4,6 +4,9 @@ from pathlib import Path
 import shlex
 import subprocess
 from typing import Any
+from urllib.parse import urlparse
+
+import httpx
 
 from softnix_agentic_agent.types import ActionResult
 
@@ -25,6 +28,8 @@ class SafeActionExecutor:
                 return self._write_workspace_file(params)
             if name == "run_safe_command":
                 return self._run_safe_command(params)
+            if name == "web_fetch":
+                return self._web_fetch(params)
             return ActionResult(name=name, ok=False, output="", error=f"Action not allowed: {name}")
         except Exception as exc:
             return ActionResult(name=name, ok=False, output="", error=str(exc))
@@ -86,9 +91,11 @@ class SafeActionExecutor:
         base = parts[0]
         if base not in self.safe_commands:
             raise ValueError(f"Command is not allowlisted: {base}")
-        blocked_tokens = {"rm", "sudo", "curl", "wget", "ssh", "scp", "mv"}
+        blocked_tokens = {"sudo", "curl", "wget", "ssh", "scp", "mv"}
         if any(token in blocked_tokens for token in parts):
             raise ValueError("Command contains blocked token")
+        if base == "rm":
+            self._validate_rm_paths(parts)
 
         proc = subprocess.run(
             parts,
@@ -102,3 +109,54 @@ class SafeActionExecutor:
         if proc.returncode != 0:
             return ActionResult(name="run_safe_command", ok=False, output=output, error=f"exit_code={proc.returncode}")
         return ActionResult(name="run_safe_command", ok=True, output=output.strip())
+
+    def _validate_rm_paths(self, parts: list[str]) -> None:
+        if len(parts) < 2:
+            raise ValueError("rm requires at least one path")
+
+        targets: list[str] = []
+        treat_as_target = False
+        for token in parts[1:]:
+            if token == "--":
+                treat_as_target = True
+                continue
+            if not treat_as_target and token.startswith("-"):
+                continue
+            targets.append(token)
+
+        if not targets:
+            raise ValueError("rm requires at least one path")
+
+        for target in targets:
+            self._resolve_workspace_path(target)
+
+    def _web_fetch(self, params: dict[str, Any]) -> ActionResult:
+        url = str(params.get("url", "")).strip()
+        if not url:
+            raise ValueError("Missing url")
+
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Only http/https URLs are allowed")
+        if not parsed.netloc:
+            raise ValueError("Invalid URL")
+        if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Fetching localhost is not allowed")
+
+        timeout_sec = float(params.get("timeout_sec", 15))
+        max_chars = int(params.get("max_chars", 12000))
+
+        resp = httpx.get(url, timeout=timeout_sec, follow_redirects=True)
+        resp.raise_for_status()
+
+        text = resp.text or ""
+        if len(text) > max_chars:
+            text = text[:max_chars]
+
+        output = (
+            f"url={url}\n"
+            f"status={resp.status_code}\n"
+            f"content_type={resp.headers.get('content-type', '')}\n\n"
+            f"{text}"
+        )
+        return ActionResult(name="web_fetch", ok=True, output=output)

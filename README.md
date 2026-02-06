@@ -88,11 +88,13 @@ Action ที่รองรับในรุ่นแรก:
 - `read_file`
 - `write_workspace_file`
 - `run_safe_command`
+- `web_fetch`
 
 ข้อจำกัด:
 - ห้าม path ออกนอก workspace
 - shell command ต้องอยู่ใน allowlist (`SOFTNIX_SAFE_COMMANDS`)
-- token เสี่ยง (`rm`, `sudo`, `curl`, `wget`, `ssh`, `scp`, `mv`) ถูก block
+- token เสี่ยง (`sudo`, `curl`, `wget`, `ssh`, `scp`, `mv`) ถูก block
+- `rm` อนุญาตเมื่ออยู่ใน allowlist และลบได้เฉพาะ path ภายใน workspace
 
 ## หมายเหตุสำหรับ Desktop/Web
 

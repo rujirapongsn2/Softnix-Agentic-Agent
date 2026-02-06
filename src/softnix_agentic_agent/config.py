@@ -24,13 +24,15 @@ class Settings:
 
     def __post_init__(self) -> None:
         if self.safe_commands is None:
-            self.safe_commands = ["ls", "pwd", "cat", "echo", "python", "pytest"]
+            self.safe_commands = ["ls", "pwd", "cat", "echo", "python", "pytest", "rm"]
 
 
 def load_settings() -> Settings:
     _load_dotenv()
-    safe_commands_raw = os.getenv("SOFTNIX_SAFE_COMMANDS", "ls,pwd,cat,echo,python,pytest")
+    safe_commands_raw = os.getenv("SOFTNIX_SAFE_COMMANDS", "ls,pwd,cat,echo,python,pytest,rm")
     safe_commands = [x.strip() for x in safe_commands_raw.split(",") if x.strip()]
+    if "rm" not in safe_commands:
+        safe_commands.append("rm")
     return Settings(
         provider=os.getenv("SOFTNIX_PROVIDER", "openai"),
         model=os.getenv("SOFTNIX_MODEL", "gpt-4o-mini"),

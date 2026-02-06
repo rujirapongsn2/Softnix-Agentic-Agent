@@ -14,7 +14,7 @@ Return STRICT JSON only with shape:
   "done": boolean,
   "final_output": "string when done=true else optional",
   "actions": [
-    {"name": "list_dir|read_file|write_workspace_file|run_safe_command", "params": {...}}
+    {"name": "list_dir|read_file|write_workspace_file|run_safe_command|web_fetch", "params": {...}}
   ]
 }
 Rules:
@@ -23,6 +23,7 @@ Rules:
 - Use done=true only when task is complete.
 - For file actions, always use params.path (not file_path).
 - Use paths relative to workspace (e.g. "index.html", "assets/app.js"), never absolute paths.
+- For web fetch, use params.url with full http/https URL.
 - Keep responses compact and valid JSON. Never wrap with ``` fences.
 - If content is long, split work into multiple iterations and use mode="append".
 """.strip()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import threading
@@ -30,7 +31,7 @@ def run(
     skills_dir: Path | None = typer.Option(None, "--skills-dir"),
 ) -> None:
     settings = load_settings()
-    if workspace is None:
+    if _should_use_stdout_mode(workspace):
         resolved = _resolve_run_options(settings, provider, model, max_iters, workspace, skills_dir)
         output = _run_with_spinner(
             "Generating output",
@@ -119,6 +120,13 @@ def _resolve_run_options(
         "workspace": workspace or settings.workspace,
         "skills_dir": skills_dir or settings.skills_dir,
     }
+
+
+def _should_use_stdout_mode(workspace: Path | None) -> bool:
+    if workspace is not None:
+        return False
+    configured_workspace = os.getenv("SOFTNIX_WORKSPACE", "").strip()
+    return configured_workspace == ""
 
 
 def _run_stdout_mode(task: str, provider_name: str, model: str, settings) -> str:
