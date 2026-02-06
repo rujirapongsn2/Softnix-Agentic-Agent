@@ -15,6 +15,12 @@ class FilesystemStore:
     def run_dir(self, run_id: str) -> Path:
         return self.runs_dir / run_id
 
+    def list_run_ids(self) -> list[str]:
+        if not self.runs_dir.exists():
+            return []
+        ids = [p.name for p in self.runs_dir.iterdir() if p.is_dir() and (p / "state.json").exists()]
+        return sorted(ids)
+
     def init_run(self, state: RunState) -> None:
         rd = self.run_dir(state.run_id)
         (rd / "artifacts").mkdir(parents=True, exist_ok=True)
@@ -60,6 +66,26 @@ class FilesystemStore:
             if line.strip():
                 rows.append(json.loads(line))
         return rows
+
+    def read_events(self, run_id: str) -> list[str]:
+        p = self.run_dir(run_id) / "events.log"
+        if not p.exists():
+            return []
+        return [line for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def list_artifacts(self, run_id: str) -> list[str]:
+        artifacts_dir = self.run_dir(run_id) / "artifacts"
+        if not artifacts_dir.exists():
+            return []
+        files = [str(p.relative_to(artifacts_dir)) for p in artifacts_dir.rglob("*") if p.is_file()]
+        return sorted(files)
+
+    def resolve_artifact_path(self, run_id: str, artifact_path: str) -> Path:
+        artifacts_dir = (self.run_dir(run_id) / "artifacts").resolve()
+        target = (artifacts_dir / artifact_path).resolve()
+        if not str(target).startswith(str(artifacts_dir)):
+            raise ValueError("artifact path escapes artifacts directory")
+        return target
 
     def log_event(self, run_id: str, message: str) -> None:
         p = self.run_dir(run_id) / "events.log"

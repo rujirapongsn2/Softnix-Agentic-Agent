@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 20% -10%, rgba(82, 184, 140, 0.22), transparent 45%),
+    radial-gradient(circle at 80% -15%, rgba(255, 178, 120, 0.28), transparent 40%),
+    hsl(220 22% 98%);
+  color: hsl(224 26% 12%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.prose pre {
+  overflow-x: auto;
+  border-radius: 0.6rem;
+  padding: 0.85rem;
+  background: hsl(220 18% 95%);
+}

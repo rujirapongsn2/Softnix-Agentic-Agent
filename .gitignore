@@ -19,3 +19,7 @@ tmp/
 # test outputs
 *.log
 reports/
+
+# web ui
+web-ui/node_modules/
+web-ui/dist/

@@ -68,9 +68,59 @@ softnix api serve --host 127.0.0.1 --port 8787
 ## REST API
 
 - `POST /runs` เริ่ม run ใหม่
+- `GET /runs` อ่านรายการ runs
 - `GET /runs/{id}` อ่านสถานะ run
 - `GET /runs/{id}/iterations` อ่าน iteration logs
+- `GET /runs/{id}/stream` stream ความคืบหน้าแบบ SSE
+- `GET /runs/{id}/stream?last_event_id=<n>` resume stream จาก event id ล่าสุด
+- `GET /runs/{id}/events` อ่าน events log
 - `POST /runs/{id}/cancel` ส่งคำขอหยุด run
+- `POST /runs/{id}/resume` สั่ง resume run
+- `GET /skills` อ่านรายการ skills
+- `GET /artifacts/{id}` อ่านรายการ artifacts
+- `GET /artifacts/{id}/{path}` ดาวน์โหลด artifact
+- `GET /health` ตรวจสถานะ provider connectivity/config
+- `GET /system/config` อ่าน effective runtime config (safe fields)
+
+## Web UI (ChatGPT-like)
+
+โฟลเดอร์ `web-ui/` เป็น frontend สำหรับใช้งานกับ API backend โดยใช้:
+- React + Vite
+- Tailwind CSS + shadcn-style components
+- Framer Motion animations
+- Streaming markdown renderer และ AI-native UI blocks
+
+### รัน Backend
+
+```bash
+softnix api serve --host 127.0.0.1 --port 8787
+```
+
+ควรเปิด `venv` ก่อนทุกครั้ง:
+
+```bash
+source .venv/bin/activate
+```
+
+### รัน Web UI
+
+```bash
+cd web-ui
+npm install
+npm run dev
+```
+
+ค่า default API คือ `http://127.0.0.1:8787` และ override ได้ด้วย env:
+
+```bash
+VITE_API_BASE_URL=http://127.0.0.1:8787
+```
+
+### เข้าใช้งาน Web UI
+
+1. เปิดเบราว์เซอร์ที่ `http://127.0.0.1:5173`
+2. กรอก task/provider/model แล้วกด `Start Run`
+3. ดู conversation timeline และใช้ปุ่ม `Cancel`/`Resume` ได้ตรงนี้เลย
 
 ## รูปแบบไฟล์ Persistence
 
