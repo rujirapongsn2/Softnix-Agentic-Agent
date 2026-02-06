@@ -21,6 +21,10 @@ Rules:
 - Do not include markdown.
 - Prefer small safe actions.
 - Use done=true only when task is complete.
+- For file actions, always use params.path (not file_path).
+- Use paths relative to workspace (e.g. "index.html", "assets/app.js"), never absolute paths.
+- Keep responses compact and valid JSON. Never wrap with ``` fences.
+- If content is long, split work into multiple iterations and use mode="append".
 """.strip()
 
 
@@ -48,13 +52,13 @@ class Planner:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        resp = self.provider.generate(messages=messages, model=self.model)
+        resp = self.provider.generate(messages=messages, model=self.model, max_tokens=4096)
         parsed = _parse_plan_json(resp.content)
         return parsed, resp.usage, user_prompt
 
 
 def _parse_plan_json(content: str) -> dict[str, Any]:
-    content = content.strip()
+    content = _strip_code_fence(content.strip())
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -68,7 +72,18 @@ def _parse_plan_json(content: str) -> dict[str, Any]:
 
     return {
         "thought": "fallback parse: invalid JSON from model",
-        "done": True,
-        "final_output": content,
+        "done": False,
+        "final_output": "planner_parse_error: model returned invalid or truncated JSON",
         "actions": [],
     }
+
+
+def _strip_code_fence(content: str) -> str:
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return content

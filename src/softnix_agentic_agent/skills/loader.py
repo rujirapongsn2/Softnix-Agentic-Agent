@@ -24,9 +24,9 @@ class SkillLoader:
 
         lines = []
         for s in skills:
-            refs = ", ".join(str(r) for r in s.references[:3])
-            if refs:
-                lines.append(f"- {s.name}: {s.description} | refs: {refs}")
+            if s.references:
+                lines.append(f"- {s.name}: {s.description} | references={len(s.references)} files")
             else:
                 lines.append(f"- {s.name}: {s.description}")
+        lines.append("Note: skill references are metadata only; do not read outside workspace.")
         return "\n".join(lines)

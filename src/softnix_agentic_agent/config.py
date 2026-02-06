@@ -28,6 +28,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    _load_dotenv()
     safe_commands_raw = os.getenv("SOFTNIX_SAFE_COMMANDS", "ls,pwd,cat,echo,python,pytest")
     safe_commands = [x.strip() for x in safe_commands_raw.split(",") if x.strip()]
     return Settings(
@@ -46,3 +47,31 @@ def load_settings() -> Settings:
         custom_base_url=os.getenv("SOFTNIX_CUSTOM_BASE_URL"),
         custom_model=os.getenv("SOFTNIX_CUSTOM_MODEL", "gpt-4o-mini"),
     )
+
+
+def _load_dotenv(dotenv_path: Path | None = None) -> None:
+    path = dotenv_path or Path(".env")
+    if not path.exists() or not path.is_file():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            value = value[1:-1]
+
+        # Keep explicitly exported shell env as highest priority.
+        if key not in os.environ:
+            os.environ[key] = value

@@ -1,0 +1,21 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+
+# runtime
+.env
+.env.*
+.softnix/
+tmp/
+
+# test outputs
+*.log
+reports/

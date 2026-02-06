@@ -30,6 +30,10 @@ class ClaudeProvider(LLMProvider):
         temperature: float = 0.2,
         max_tokens: int = 1024,
     ) -> LLMResponse:
+        if model.lower().startswith("gpt-"):
+            raise ValueError(
+                "Model looks like OpenAI but provider is claude. Use --provider openai or custom for OpenAI-compatible endpoints."
+            )
         user_text = "\n\n".join(f"{m['role']}: {m['content']}" for m in messages)
         payload: dict[str, Any] = {
             "model": model,

@@ -43,3 +43,21 @@ def test_factory_custom() -> None:
 def test_factory_invalid() -> None:
     with pytest.raises(ValueError):
         create_provider("bad", _settings())
+
+
+def test_openai_provider_requires_api_key() -> None:
+    provider = OpenAIProvider(api_key=None)
+    with pytest.raises(ValueError, match="SOFTNIX_OPENAI_API_KEY"):
+        provider.generate(messages=[{"role": "user", "content": "hi"}], model="gpt-4o-mini")
+
+
+def test_openai_provider_rejects_claude_model_name() -> None:
+    provider = OpenAIProvider(api_key="x")
+    with pytest.raises(ValueError, match="Model looks like Claude"):
+        provider.generate(messages=[{"role": "user", "content": "hi"}], model="claude-haiku-4-5")
+
+
+def test_claude_provider_rejects_openai_model_name() -> None:
+    provider = ClaudeProvider(api_key="x")
+    with pytest.raises(ValueError, match="Model looks like OpenAI"):
+        provider.generate(messages=[{"role": "user", "content": "hi"}], model="gpt-4o-mini")

@@ -112,7 +112,13 @@ class AgentLoopRunner:
                 output = str(plan.get("final_output") or "")
                 if not output and action_results:
                     output = "\n\n".join(
-                        [f"[{x['name']}] ok={x['ok']}\n{x['output']}" for x in action_results]
+                        [
+                            (
+                                f"[{x['name']}] ok={x['ok']}\n{x['output']}\n"
+                                + (f"error={x['error']}" if x.get("error") else "")
+                            ).strip()
+                            for x in action_results
+                        ]
                     )
 
                 record = IterationRecord(

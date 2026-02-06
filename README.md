@@ -26,12 +26,13 @@ CLI-first agent framework ที่ทำงานตาม flow:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+pip install -e '.[dev]'
 ```
 
 ## ตั้งค่า Environment
 
 คัดลอก `.env.example` และกำหนดค่า API key ตาม provider ที่ใช้
+ตัวระบบจะโหลดไฟล์ `.env` อัตโนมัติจาก current working directory ตอนรันคำสั่ง `softnix`
 
 ตัวอย่างที่ต้องมี:
 - `SOFTNIX_OPENAI_API_KEY` เมื่อใช้ `openai`

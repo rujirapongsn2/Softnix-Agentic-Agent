@@ -30,10 +30,22 @@ class SafeActionExecutor:
             return ActionResult(name=name, ok=False, output="", error=str(exc))
 
     def _resolve_workspace_path(self, value: str) -> Path:
-        p = (self.workspace / value).resolve()
+        raw = Path(value)
+        if raw.is_absolute():
+            p = raw.resolve()
+        else:
+            p = (self.workspace / raw).resolve()
         if not str(p).startswith(str(self.workspace)):
             raise ValueError("Path escapes workspace")
         return p
+
+    def _get_path_param(self, params: dict[str, Any]) -> str:
+        path_value = params.get("path")
+        if path_value is None:
+            path_value = params.get("file_path")
+        if path_value is None:
+            raise ValueError("Missing required path parameter")
+        return str(path_value)
 
     def _list_dir(self, params: dict[str, Any]) -> ActionResult:
         rel = params.get("path", ".")
@@ -44,7 +56,7 @@ class SafeActionExecutor:
         return ActionResult(name="list_dir", ok=True, output="\n".join(items))
 
     def _read_file(self, params: dict[str, Any]) -> ActionResult:
-        rel = params["path"]
+        rel = self._get_path_param(params)
         p = self._resolve_workspace_path(str(rel))
         if not p.exists() or not p.is_file():
             raise ValueError(f"Not a file: {p}")
@@ -52,7 +64,7 @@ class SafeActionExecutor:
         return ActionResult(name="read_file", ok=True, output=content[:12000])
 
     def _write_workspace_file(self, params: dict[str, Any]) -> ActionResult:
-        rel = params["path"]
+        rel = self._get_path_param(params)
         content = str(params.get("content", ""))
         mode = str(params.get("mode", "overwrite"))
         p = self._resolve_workspace_path(str(rel))
