@@ -39,6 +39,11 @@ pip install -e '.[dev]'
 - `SOFTNIX_CLAUDE_API_KEY` เมื่อใช้ `claude`
 - `SOFTNIX_CUSTOM_BASE_URL` (+ optional key) เมื่อใช้ `custom`
 
+ตัวเลือกด้าน security:
+- `SOFTNIX_API_KEY` เปิด API key protection ให้ทุก endpoint (ยกเว้น `/health`, `/docs`, `/openapi.json`)
+- `SOFTNIX_CORS_ORIGINS` กำหนด origin ที่อนุญาต (comma-separated)
+- `SOFTNIX_CORS_ALLOW_CREDENTIALS` (`true`/`false`)
+
 ## การใช้งาน CLI
 
 ### 1) Run task
@@ -82,6 +87,10 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `GET /health` ตรวจสถานะ provider connectivity/config
 - `GET /system/config` อ่าน effective runtime config (safe fields)
 
+เมื่อเปิด `SOFTNIX_API_KEY`:
+- ทุก request ที่เข้าถึง API หลักต้องส่ง header `x-api-key: <your-key>`
+- CORS preflight (`OPTIONS`) ยังทำงานได้ปกติสำหรับ origin ที่ allow ไว้
+
 ## Web UI (ChatGPT-like)
 
 โฟลเดอร์ `web-ui/` เป็น frontend สำหรับใช้งานกับ API backend โดยใช้:
@@ -114,6 +123,7 @@ npm run dev
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:8787
+VITE_SOFTNIX_API_KEY=
 ```
 
 ### เข้าใช้งาน Web UI

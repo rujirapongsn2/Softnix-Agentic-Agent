@@ -71,6 +71,8 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     assert r2.status_code == 200
     assert r2.json()["run_id"] == run_id
     assert r2.json()["workspace"] == str(tmp_path)
+    assert r2.headers.get("x-content-type-options") == "nosniff"
+    assert r2.headers.get("x-frame-options") == "DENY"
 
     r3 = client.get(f"/runs/{run_id}/iterations")
     assert r3.status_code == 200
@@ -134,3 +136,37 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     )
     assert cors_preflight.status_code == 200
     assert cors_preflight.headers.get("access-control-allow-origin") == "http://127.0.0.1:5173"
+
+
+def test_api_requires_key_when_configured(monkeypatch, tmp_path: Path) -> None:
+    from softnix_agentic_agent.api import app as app_module
+
+    settings = Settings(runs_dir=tmp_path / "runs", workspace=tmp_path, skills_dir=tmp_path, api_key="secret-key")
+    store = FilesystemStore(settings.runs_dir)
+
+    monkeypatch.setattr(app_module, "_settings", settings)
+    monkeypatch.setattr(app_module, "_store", store)
+    monkeypatch.setattr(app_module, "_threads", {})
+
+    def fake_build_runner(settings, provider_name, model=None):  # type: ignore[no-untyped-def]
+        return FakeRunner(store=store, workspace=tmp_path)
+
+    monkeypatch.setattr(app_module, "build_runner", fake_build_runner)
+
+    client = TestClient(app_module.app)
+
+    no_key = client.get("/runs")
+    assert no_key.status_code == 401
+    assert no_key.json()["detail"] == "unauthorized"
+
+    bad_key = client.get("/runs", headers={"x-api-key": "wrong"})
+    assert bad_key.status_code == 401
+
+    ok = client.get("/runs", headers={"x-api-key": "secret-key"})
+    assert ok.status_code == 200
+
+    ok_query = client.get("/runs?api_key=secret-key")
+    assert ok_query.status_code == 200
+
+    health = client.get("/health")
+    assert health.status_code == 200

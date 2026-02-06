@@ -1,6 +1,7 @@
 import type { RunCreatePayload, RunState, SkillItem } from "@/types/api";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8787";
+const API_KEY = import.meta.env.VITE_SOFTNIX_API_KEY ?? "";
 const STREAM_RETRY_MS = 1000;
 
 const runLastEventIds = new Map<string, string>();
@@ -28,10 +29,12 @@ function setLastEventId(runId: string, id: string): void {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const authHeaders = API_KEY ? { "x-api-key": API_KEY } : {};
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...authHeaders,
       ...(init?.headers ?? {})
     }
   });
@@ -106,6 +109,7 @@ export function streamRun(
     const lastId = getLastEventId(runId);
     const query = new URLSearchParams({ poll_ms: "500" });
     if (lastId) query.set("last_event_id", lastId);
+    if (API_KEY) query.set("api_key", API_KEY);
 
     const es = new EventSource(`${API_BASE}/runs/${runId}/stream?${query.toString()}`);
     currentEs = es;

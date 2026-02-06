@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import secrets
 import threading
 import time
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from softnix_agentic_agent.config import load_settings
@@ -33,14 +34,30 @@ _threads: dict[str, threading.Thread] = {}
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=_settings.cors_origins,
+    allow_credentials=_settings.cors_allow_credentials,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+def _is_public_path(path: str) -> bool:
+    return path in {"/health", "/docs", "/redoc", "/openapi.json"}
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+    if request.method != "OPTIONS" and _settings.api_key and not _is_public_path(request.url.path):
+        provided = request.headers.get("x-api-key", "") or request.query_params.get("api_key", "")
+        if not secrets.compare_digest(provided, _settings.api_key):
+            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 def _background_execute(run_id: str, provider: str, model: str | None) -> None:
