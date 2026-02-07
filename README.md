@@ -21,6 +21,44 @@ CLI-first agent framework ที่ทำงานตาม flow:
 - `src/softnix_agentic_agent/providers/*` adapter ของ provider
 - `src/softnix_agentic_agent/api/app.py` REST facade
 
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+    User["User"] --> CLI["CLI (softnix run/resume)"]
+    User --> WEB["Web UI (React/Vite)"]
+
+    WEB --> API["REST API Facade (FastAPI)"]
+    CLI --> CORE["Agent Core"]
+    API --> CORE
+
+    CORE --> LOOP["Agent Loop"]
+    LOOP --> PLAN["Planner"]
+    LOOP --> EXEC["Safe Action Executor"]
+    LOOP --> STORE["FilesystemStore"]
+    LOOP --> SKILLS["Skill Loader/Parser"]
+
+    PLAN --> PROVIDERS["LLM Providers (OpenAI / Claude / Custom)"]
+    EXEC --> WORKSPACE["Workspace Files"]
+    STORE --> RUNS[".softnix/runs/<run_id>"]
+
+    RUNS --> STATE["state.json"]
+    RUNS --> ITERS["iterations.jsonl"]
+    RUNS --> EVENTS["events.log"]
+    RUNS --> ARTIFACTS["artifacts/"]
+
+    API --> RUNS
+    WEB -->|SSE + REST| API
+    WEB -->|Download artifacts| API
+```
+
+ลำดับการทำงานหลัก:
+1. รับ `task` จาก CLI หรือ Web UI
+2. Agent Core เริ่ม `Agent Loop` และเรียก `Planner` เพื่อขอแผนจาก LLM Provider
+3. `Safe Action Executor` ทำ action ที่อนุญาตและเขียนไฟล์ใน workspace
+4. `FilesystemStore` บันทึก state/iterations/events/artifacts ต่อเนื่องทุก iteration
+5. API/Web UI อ่านสถานะล่าสุดและ timeline จาก run storage แบบ near real-time
+
 ## ติดตั้ง
 
 ```bash
