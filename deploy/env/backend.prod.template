@@ -1,0 +1,21 @@
+SOFTNIX_PROVIDER=openai
+SOFTNIX_MODEL=gpt-4o-mini
+SOFTNIX_MAX_ITERS=10
+SOFTNIX_WORKSPACE=/var/lib/softnix/workspace
+SOFTNIX_RUNS_DIR=/var/lib/softnix/runs
+SOFTNIX_SKILLS_DIR=/var/lib/softnix/skills
+SOFTNIX_SAFE_COMMANDS=ls,pwd,cat,echo,python,pytest,rm
+
+# Security
+SOFTNIX_API_KEY=prod-rotate-and-store-in-secret-manager
+SOFTNIX_CORS_ORIGINS=https://agent.softnix.example
+SOFTNIX_CORS_ALLOW_CREDENTIALS=true
+
+# Providers
+SOFTNIX_OPENAI_API_KEY=
+SOFTNIX_OPENAI_BASE_URL=https://api.openai.com/v1
+SOFTNIX_CLAUDE_API_KEY=
+SOFTNIX_CLAUDE_BASE_URL=https://api.anthropic.com
+SOFTNIX_CUSTOM_API_KEY=
+SOFTNIX_CUSTOM_BASE_URL=
+SOFTNIX_CUSTOM_MODEL=gpt-4o-mini

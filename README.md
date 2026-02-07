@@ -132,6 +132,20 @@ VITE_SOFTNIX_API_KEY=
 2. กรอก task/provider/model แล้วกด `Start Run`
 3. ดู conversation timeline และใช้ปุ่ม `Cancel`/`Resume` ได้ตรงนี้เลย
 
+## Deployment Config
+
+มี deployment templates แยก environment สำหรับ backend/frontend ที่ `deploy/env/`
+
+ไฟล์สำคัญ:
+- `deploy/env/backend.dev.template`
+- `deploy/env/backend.staging.template`
+- `deploy/env/backend.prod.template`
+- `deploy/env/frontend.dev.template`
+- `deploy/env/frontend.staging.template`
+- `deploy/env/frontend.prod.template`
+
+ดูขั้นตอนใช้งานทั้งหมดที่ `deploy/README.md`
+
 ## รูปแบบไฟล์ Persistence
 
 สำหรับแต่ละ run จะถูกเก็บที่:

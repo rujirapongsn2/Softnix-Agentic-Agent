@@ -15,6 +15,7 @@ venv/
 .env.*
 .softnix/
 tmp/
+deploy/local/
 
 # test outputs
 *.log
