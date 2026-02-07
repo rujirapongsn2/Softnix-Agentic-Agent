@@ -81,6 +81,13 @@ pip install -e '.[dev]'
 - `SOFTNIX_API_KEY` เปิด API key protection ให้ทุก endpoint (ยกเว้น `/health`, `/docs`, `/openapi.json`)
 - `SOFTNIX_CORS_ORIGINS` กำหนด origin ที่อนุญาต (comma-separated)
 - `SOFTNIX_CORS_ALLOW_CREDENTIALS` (`true`/`false`)
+- `SOFTNIX_EXEC_TIMEOUT_SEC` timeout ต่อ action ที่รันคำสั่ง/โค้ด
+- `SOFTNIX_MAX_ACTION_OUTPUT_CHARS` จำกัดขนาด output ต่อ action
+- `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `PROFILE.md`)
+- `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `SESSION.md`)
+- `SOFTNIX_MEMORY_POLICY_PATH` path ของ global policy memory (admin-managed only)
+- `SOFTNIX_MEMORY_PROMPT_MAX_ITEMS` จำนวน memory items สูงสุดที่ inject เข้า planner prompt
+- `SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE` ค่าขั้นต่ำ (0-1) สำหรับ staging inferred memory
 
 ## การใช้งาน CLI
 
@@ -117,6 +124,7 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `GET /runs/{id}/stream` stream ความคืบหน้าแบบ SSE
 - `GET /runs/{id}/stream?last_event_id=<n>` resume stream จาก event id ล่าสุด
 - `GET /runs/{id}/events` อ่าน events log
+- `GET /runs/{id}/memory/pending` อ่าน inferred pending memory ที่รอการยืนยัน
 - `POST /runs/{id}/cancel` ส่งคำขอหยุด run
 - `POST /runs/{id}/resume` สั่ง resume run
 - `GET /skills` อ่านรายการ skills
@@ -202,7 +210,10 @@ Action ที่รองรับในรุ่นแรก:
 - `list_dir`
 - `read_file`
 - `write_workspace_file`
+- `write_file` (alias ของ `write_workspace_file`)
 - `run_safe_command`
+- `run_shell_command` (alias ของ `run_safe_command`)
+- `run_python_code`
 - `web_fetch`
 
 ข้อจำกัด:
@@ -210,6 +221,33 @@ Action ที่รองรับในรุ่นแรก:
 - shell command ต้องอยู่ใน allowlist (`SOFTNIX_SAFE_COMMANDS`)
 - token เสี่ยง (`sudo`, `curl`, `wget`, `ssh`, `scp`, `mv`) ถูก block
 - `rm` อนุญาตเมื่ออยู่ใน allowlist และลบได้เฉพาะ path ภายใน workspace
+
+## Core Memory (Markdown-first)
+
+- ระบบสร้างและใช้ `PROFILE.md` และ `SESSION.md` ใน workspace อัตโนมัติ
+- รองรับคำสั่งจากผู้ใช้แบบธรรมชาติ เช่น `จำไว้ว่า response.tone = concise`
+- รองรับ TTL ในคำสั่งจำแบบ explicit เช่น `remember response.verbosity = concise for 8h`
+- รองรับ inferred preference แบบ pending (ยังไม่ commit ถาวร) จากข้อความเช่น `ขอสั้นๆ`, `ขอเป็นข้อๆ`
+- ยืนยัน pending ด้วย `ยืนยันให้จำ <key>` หรือยกเลิกด้วย `ไม่ต้องจำ <key>`
+- เฉพาะ inferred ที่มี confidence มากกว่าหรือเท่ากับ `SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE` เท่านั้นที่จะถูก stage
+- memory ที่ resolve แล้วจะถูก inject เข้า planner prompt ทุก iteration
+- มี auto compact ต่อ iteration สำหรับลบ memory ที่หมดอายุและ deduplicate key ซ้ำใน `PROFILE.md`/`SESSION.md`
+- audit การเปลี่ยน memory ถูกเก็บที่ `.softnix/runs/<run_id>/memory_audit.jsonl`
+- `POLICY.md` ถูกออกแบบให้เป็น admin-managed only และอยู่นอก user workspace path ปกติ
+
+### One-click test script
+
+รันสคริปต์ทดสอบครบ flow หลัก (explicit, ttl, inferred-pending, confirm, reject):
+
+```bash
+cd /Volumes/Seagate/myapp/Softnix-Agentic-Agent
+./scripts/test_core_memory_oneclick.sh
+```
+
+หมายเหตุ:
+- สคริปต์จะพยายาม start backend อัตโนมัติ (ใช้ `softnix` หรือ `.venv/bin/softnix` หรือ `uv run softnix`)
+- หากมี backend รันอยู่แล้ว จะใช้ instance นั้นทันที
+- สามารถ override ได้ด้วย `API_BASE=http://127.0.0.1:8787 ./scripts/test_core_memory_oneclick.sh`
 
 ## หมายเหตุสำหรับ Desktop/Web
 

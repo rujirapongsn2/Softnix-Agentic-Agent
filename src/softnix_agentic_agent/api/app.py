@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from softnix_agentic_agent.config import load_settings
+from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
+from softnix_agentic_agent.memory.service import CoreMemoryService
 from softnix_agentic_agent.providers.factory import create_provider
 from softnix_agentic_agent.runtime import build_runner
 from softnix_agentic_agent.skills.loader import SkillLoader
@@ -226,6 +228,29 @@ def get_events(run_id: str) -> dict:
     return {"items": _store.read_events(run_id)}
 
 
+@app.get("/runs/{run_id}/memory/pending")
+def get_pending_memory(run_id: str) -> dict:
+    try:
+        state = _store.read_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+
+    memory_store = MarkdownMemoryStore(
+        workspace=Path(state.workspace),
+        policy_path=_settings.memory_policy_path,
+        profile_file=_settings.memory_profile_file,
+        session_file=_settings.memory_session_file,
+    )
+    memory = CoreMemoryService(
+        memory_store,
+        _store,
+        run_id,
+        inferred_min_confidence=_settings.memory_inferred_min_confidence,
+    )
+    memory.ensure_ready()
+    return {"items": memory.list_pending()}
+
+
 @app.post("/runs/{run_id}/cancel")
 def cancel_run(run_id: str) -> dict:
     try:
@@ -262,7 +287,8 @@ def list_artifacts(run_id: str) -> dict:
         _ = _store.read_state(run_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="run not found") from exc
-    return {"items": _store.list_artifacts(run_id)}
+    items = _store.list_artifacts(run_id)
+    return {"items": items, "entries": _store.list_artifact_entries(run_id)}
 
 
 @app.get("/artifacts/{run_id}/{artifact_path:path}")

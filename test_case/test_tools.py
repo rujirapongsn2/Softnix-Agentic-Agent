@@ -91,6 +91,30 @@ def test_run_safe_command_rejects_non_allowlisted(tmp_path: Path) -> None:
     assert "allowlisted" in (result.error or "")
 
 
+def test_run_shell_command_alias_success(tmp_path: Path) -> None:
+    ex = _executor(tmp_path)
+    result = ex.execute(
+        {
+            "name": "run_shell_command",
+            "params": {"command": "echo alias-ok"},
+        }
+    )
+    assert result.ok is True
+    assert "alias-ok" in result.output
+
+
+def test_run_python_code_success(tmp_path: Path) -> None:
+    ex = _executor(tmp_path)
+    result = ex.execute(
+        {
+            "name": "run_python_code",
+            "params": {"code": "print('hello-python')"},
+        }
+    )
+    assert result.ok is True
+    assert "hello-python" in result.output
+
+
 def test_web_fetch_success(tmp_path: Path, monkeypatch) -> None:
     class _Resp:
         status_code = 200

@@ -1,4 +1,4 @@
-import type { RunCreatePayload, RunState, SkillItem } from "@/types/api";
+import type { ArtifactEntry, RunCreatePayload, RunState, SkillItem } from "@/types/api";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8787";
 const API_KEY = import.meta.env.VITE_SOFTNIX_API_KEY ?? "";
@@ -70,7 +70,7 @@ export const apiClient = {
     return request(`/runs/${runId}/events`);
   },
 
-  getRunArtifacts(runId: string): Promise<{ items: string[] }> {
+  getRunArtifacts(runId: string): Promise<{ items: string[]; entries?: ArtifactEntry[] }> {
     return request(`/artifacts/${runId}`);
   },
 

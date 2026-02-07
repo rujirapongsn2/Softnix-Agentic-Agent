@@ -48,3 +48,44 @@ def test_security_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.api_key == "abc123"
     assert settings.cors_origins == ["http://localhost:3000", "http://127.0.0.1:5173"]
     assert settings.cors_allow_credentials is False
+
+
+def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "SOFTNIX_EXEC_TIMEOUT_SEC=45\n"
+        "SOFTNIX_MAX_ACTION_OUTPUT_CHARS=5000\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SOFTNIX_EXEC_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", raising=False)
+
+    settings = load_settings()
+    assert settings.exec_timeout_sec == 45
+    assert settings.max_action_output_chars == 5000
+
+
+def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "SOFTNIX_MEMORY_PROFILE_FILE=MY_PROFILE.md\n"
+        "SOFTNIX_MEMORY_SESSION_FILE=MY_SESSION.md\n"
+        "SOFTNIX_MEMORY_POLICY_PATH=.softnix/system/ORG_POLICY.md\n"
+        "SOFTNIX_MEMORY_PROMPT_MAX_ITEMS=9\n"
+        "SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE=0.9\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SOFTNIX_MEMORY_PROFILE_FILE", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_SESSION_FILE", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_POLICY_PATH", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_PROMPT_MAX_ITEMS", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE", raising=False)
+
+    settings = load_settings()
+    assert settings.memory_profile_file == "MY_PROFILE.md"
+    assert settings.memory_session_file == "MY_SESSION.md"
+    assert str(settings.memory_policy_path) == ".softnix/system/ORG_POLICY.md"
+    assert settings.memory_prompt_max_items == 9
+    assert settings.memory_inferred_min_confidence == 0.9

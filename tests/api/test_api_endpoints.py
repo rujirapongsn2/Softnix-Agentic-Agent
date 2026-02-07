@@ -94,6 +94,17 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     assert r_events.status_code == 200
     assert isinstance(r_events.json()["items"], list)
 
+    (tmp_path / "SESSION.md").write_text(
+        "# SESSION\n\n## Context\n"
+        "- key:memory.pending.response.verbosity | value:concise | kind:preference | priority:45 | ttl:session_end | source:user_inferred | updated_at:2026-02-07T00:00:00Z\n",
+        encoding="utf-8",
+    )
+    r_pending = client.get(f"/runs/{run_id}/memory/pending")
+    assert r_pending.status_code == 200
+    pending_items = r_pending.json()["items"]
+    assert len(pending_items) == 1
+    assert pending_items[0]["target_key"] == "response.verbosity"
+
     r_runs = client.get("/runs")
     assert r_runs.status_code == 200
     assert len(r_runs.json()["items"]) >= 1
@@ -121,6 +132,7 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     r_artifacts = client.get(f"/artifacts/{run_id}")
     assert r_artifacts.status_code == 200
     assert "report.txt" in r_artifacts.json()["items"]
+    assert any(entry["path"] == "report.txt" for entry in r_artifacts.json().get("entries", []))
 
     r_artifact_file = client.get(f"/artifacts/{run_id}/report.txt")
     assert r_artifact_file.status_code == 200

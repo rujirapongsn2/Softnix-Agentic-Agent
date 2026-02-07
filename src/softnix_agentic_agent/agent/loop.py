@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import re
+import shlex
 import uuid
 from pathlib import Path
 from typing import Any
@@ -7,6 +10,8 @@ from typing import Any
 from softnix_agentic_agent.agent.executor import SafeActionExecutor
 from softnix_agentic_agent.agent.planner import Planner
 from softnix_agentic_agent.config import Settings
+from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
+from softnix_agentic_agent.memory.service import CoreMemoryService
 from softnix_agentic_agent.skills.loader import SkillLoader
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
 from softnix_agentic_agent.types import IterationRecord, RunState, RunStatus, StopReason, utc_now_iso
@@ -71,10 +76,51 @@ class AgentLoopRunner:
 
     def _run_loop(self, state: RunState) -> RunState:
         skill_loader = SkillLoader(Path(state.skills_dir))
-        executor = SafeActionExecutor(workspace=Path(state.workspace), safe_commands=self.settings.safe_commands)
+        memory_store = MarkdownMemoryStore(
+            workspace=Path(state.workspace),
+            policy_path=self.settings.memory_policy_path,
+            profile_file=self.settings.memory_profile_file,
+            session_file=self.settings.memory_session_file,
+        )
+        memory = CoreMemoryService(
+            memory_store,
+            self.store,
+            state.run_id,
+            inferred_min_confidence=self.settings.memory_inferred_min_confidence,
+        )
+        memory.ensure_ready()
+
+        executor = SafeActionExecutor(
+            workspace=Path(state.workspace),
+            safe_commands=self.settings.safe_commands,
+            command_timeout_sec=self.settings.exec_timeout_sec,
+            max_output_chars=self.settings.max_action_output_chars,
+        )
 
         try:
+            if state.iteration == 0:
+                memory_decisions = memory.apply_confirmation_text(state.task)
+                if memory_decisions:
+                    self.store.log_event(state.run_id, f"memory decisions entries={len(memory_decisions)}")
+
+                memory_changes = memory.apply_user_text(state.task)
+                if memory_changes:
+                    self.store.log_event(state.run_id, f"memory updated entries={len(memory_changes)}")
+
+                memory_staged = memory.stage_inferred_preferences(state.task)
+                if memory_staged:
+                    self.store.log_event(state.run_id, f"memory staged entries={len(memory_staged)}")
+
             while state.iteration < state.max_iters:
+                compact_stats = memory.compact(["profile", "session"])
+                if compact_stats["removed_expired"] or compact_stats["removed_duplicates"]:
+                    self.store.log_event(
+                        state.run_id,
+                        "memory compact "
+                        f"expired={compact_stats['removed_expired']} "
+                        f"duplicates={compact_stats['removed_duplicates']}",
+                    )
+
                 latest = self.store.read_state(state.run_id)
                 if latest.cancel_requested:
                     state.cancel_requested = True
@@ -87,18 +133,21 @@ class AgentLoopRunner:
 
                 current_iteration = state.iteration + 1
                 skills_context = skill_loader.render_compact_context()
+                memory_context = memory.build_prompt_context(max_items=self.settings.memory_prompt_max_items)
                 plan, token_usage, prompt_text = self.planner.build_plan(
                     task=state.task,
                     iteration=current_iteration,
                     max_iters=state.max_iters,
                     previous_output=state.last_output,
                     skills_context=skills_context,
+                    memory_context=memory_context,
                 )
 
                 actions = plan.get("actions", []) if isinstance(plan.get("actions", []), list) else []
                 action_results = []
                 for action in actions:
-                    result = executor.execute(action)
+                    prepared_action = self._prepare_action(action, state.task, Path(state.workspace))
+                    result = executor.execute(prepared_action)
                     action_results.append(
                         {
                             "name": result.name,
@@ -174,7 +223,9 @@ class AgentLoopRunner:
     def _snapshot_artifacts(self, state: RunState, actions: list[dict[str, Any]], action_results: list[dict[str, Any]]) -> None:
         workspace = Path(state.workspace)
         for action, result in zip(actions, action_results):
-            if action.get("name") != "write_workspace_file":
+            action_name = str(action.get("name", ""))
+            result_name = str(result.get("name", ""))
+            if action_name not in {"write_workspace_file", "write_file"} and result_name != "write_workspace_file":
                 continue
             if not bool(result.get("ok")):
                 continue
@@ -187,3 +238,66 @@ class AgentLoopRunner:
                 self.store.log_event(state.run_id, f"artifact saved: {rel}")
             except Exception as exc:
                 self.store.log_event(state.run_id, f"artifact snapshot failed: {exc}")
+
+    def _prepare_action(self, action: dict[str, Any], task: str, workspace: Path) -> dict[str, Any]:
+        prepared = copy.deepcopy(action)
+        name = str(prepared.get("name", ""))
+        if name not in {"run_safe_command", "run_shell_command"}:
+            return prepared
+
+        params = prepared.get("params")
+        if not isinstance(params, dict):
+            return prepared
+
+        command = str(params.get("command", "")).strip()
+        if not command:
+            return prepared
+
+        try:
+            parts = shlex.split(command)
+        except Exception:
+            return prepared
+        if not parts or parts[0] != "rm":
+            return prepared
+
+        if self._has_rm_targets(parts):
+            return prepared
+
+        targets = self._extract_file_targets_from_task(task, workspace)
+        if not targets:
+            return prepared
+
+        params["paths"] = targets
+        params["command"] = f"{command} " + " ".join(shlex.quote(t) for t in targets)
+        return prepared
+
+    def _has_rm_targets(self, parts: list[str]) -> bool:
+        treat_as_target = False
+        for token in parts[1:]:
+            if token == "--":
+                treat_as_target = True
+                continue
+            if not treat_as_target and token.startswith("-"):
+                continue
+            return True
+        return False
+
+    def _extract_file_targets_from_task(self, task: str, workspace: Path) -> list[str]:
+        candidates = re.findall(r"([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)", task)
+        safe_targets: list[str] = []
+        root = workspace.resolve()
+        for raw in candidates:
+            target = (root / raw).resolve()
+            if not str(target).startswith(str(root)):
+                continue
+            if target.exists() and target.is_file():
+                safe_targets.append(str(target.relative_to(root)))
+        # preserve order, deduplicate
+        seen = set()
+        uniq = []
+        for t in safe_targets:
+            if t in seen:
+                continue
+            seen.add(t)
+            uniq.append(t)
+        return uniq

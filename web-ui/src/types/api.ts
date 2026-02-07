@@ -31,6 +31,12 @@ export interface SkillItem {
   path: string;
 }
 
+export interface ArtifactEntry {
+  path: string;
+  size: number;
+  modified_at: number;
+}
+
 export interface StreamEnvelope {
   event: string;
   data: unknown;

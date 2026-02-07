@@ -101,3 +101,24 @@ def test_rm_rejects_outside_workspace(tmp_path: Path) -> None:
     result = ex.execute({"name": "run_safe_command", "params": {"command": "rm ../outside.txt"}})
     assert result.ok is False
     assert "workspace" in (result.error or "")
+
+
+def test_run_python_code_rejects_non_allowlisted_binary(tmp_path: Path) -> None:
+    ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["ls"])
+    result = ex.execute(
+        {
+            "name": "run_python_code",
+            "params": {"code": "print('x')", "python_bin": "python"},
+        }
+    )
+    assert result.ok is False
+    assert "allowlisted" in (result.error or "")
+
+
+def test_rm_supports_targets_from_params(tmp_path: Path) -> None:
+    target = tmp_path / "script.py"
+    target.write_text("print('x')", encoding="utf-8")
+    ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["rm"])
+    result = ex.execute({"name": "run_safe_command", "params": {"command": "rm -f", "path": "script.py"}})
+    assert result.ok is True
+    assert target.exists() is False

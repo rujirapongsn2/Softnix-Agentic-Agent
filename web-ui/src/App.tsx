@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { apiClient, streamRun } from "@/lib/api-client";
 import { cn, formatTime } from "@/lib/utils";
-import type { RunState, SkillItem } from "@/types/api";
+import type { ArtifactEntry, RunState, SkillItem } from "@/types/api";
 
 type TimelineItem =
   | { id: string; kind: "event"; text: string }
@@ -42,12 +42,20 @@ function ProcessingIndicator({ text = "Agent is processing" }: { text?: string }
   );
 }
 
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size < 1024) return `${size} B`;
+  const kb = size / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(1)} MB`;
+}
+
 export function App() {
   const [runs, setRuns] = useState<RunState[]>([]);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
-  const [artifacts, setArtifacts] = useState<string[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [health, setHealth] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [task, setTask] = useState("Write html javascript for landing page portfolio");
   const [provider, setProvider] = useState("claude");
@@ -56,6 +64,10 @@ export function App() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [artifactError, setArtifactError] = useState<string | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactDownloadingPath, setArtifactDownloadingPath] = useState<string | null>(null);
+  const [artifactQuery, setArtifactQuery] = useState("");
+  const [artifactSort, setArtifactSort] = useState<"name" | "date" | "size">("date");
   const [showArtifacts, setShowArtifacts] = useState(true);
 
   const streamRef = useRef<EventSource | null>(null);
@@ -63,6 +75,19 @@ export function App() {
 
   const selectedRun = useMemo(() => runs.find((r) => r.run_id === selectedRunId) ?? null, [runs, selectedRunId]);
   const isSelectedRunRunning = selectedRun?.status === "running" || pending;
+  const visibleArtifacts = useMemo(() => {
+    const q = artifactQuery.trim().toLowerCase();
+    const filtered = artifacts.filter((item) => !q || item.path.toLowerCase().includes(q));
+    const sorted = [...filtered];
+    if (artifactSort === "name") {
+      sorted.sort((a, b) => a.path.localeCompare(b.path));
+    } else if (artifactSort === "size") {
+      sorted.sort((a, b) => b.size - a.size);
+    } else {
+      sorted.sort((a, b) => b.modified_at - a.modified_at);
+    }
+    return sorted;
+  }, [artifacts, artifactQuery, artifactSort]);
 
   useEffect(() => {
     void refreshSideData();
@@ -145,12 +170,18 @@ export function App() {
 
   async function refreshArtifacts(runId: string) {
     try {
+      setArtifactLoading(true);
       setArtifactError(null);
       const res = await apiClient.getRunArtifacts(runId);
-      setArtifacts(res.items);
+      const entries = Array.isArray(res.entries)
+        ? res.entries
+        : res.items.map((path) => ({ path, size: 0, modified_at: 0 }));
+      setArtifacts(entries);
     } catch (e) {
       setArtifacts([]);
       setArtifactError((e as Error).message);
+    } finally {
+      setArtifactLoading(false);
     }
   }
 
@@ -188,6 +219,13 @@ export function App() {
     if (!selectedRunId) return;
     await apiClient.resumeRun(selectedRunId);
     await refreshRunsOnly();
+  }
+
+  function onDownloadArtifact(path: string) {
+    if (!selectedRunId) return;
+    setArtifactDownloadingPath(path);
+    window.open(apiClient.artifactDownloadUrl(selectedRunId, path), "_blank", "noopener,noreferrer");
+    window.setTimeout(() => setArtifactDownloadingPath((prev) => (prev === path ? null : prev)), 1000);
   }
 
   function providerBadge(item: { ok: boolean; message: string }) {
@@ -392,31 +430,60 @@ export function App() {
                   {selectedRun ? `Run: ${selectedRun.run_id}` : "Select a run to view artifacts"}
                 </div>
               </CardHeader>
-              <CardContent>
-                {artifactError ? <div className="mb-3 text-xs text-red-600">{artifactError}</div> : null}
-                {!artifactError && selectedRunId && artifacts.length === 0 ? (
-                  <div className="text-xs text-muted-foreground">No artifacts yet</div>
-                ) : null}
-                {!selectedRunId ? <div className="text-xs text-muted-foreground">No run selected</div> : null}
+            <CardContent>
+              <div className="mb-3 grid grid-cols-3 gap-2">
+                <Input
+                  className="col-span-2"
+                  placeholder="Search artifacts"
+                  value={artifactQuery}
+                  onChange={(e) => setArtifactQuery(e.target.value)}
+                />
+                <select
+                  className="h-10 rounded-md border border-input bg-background px-3 text-xs"
+                  value={artifactSort}
+                  onChange={(e) => setArtifactSort(e.target.value as "name" | "date" | "size")}
+                >
+                  <option value="date">Date</option>
+                  <option value="name">Name</option>
+                  <option value="size">Size</option>
+                </select>
+              </div>
+              {artifactError ? <div className="mb-3 text-xs text-red-600">{artifactError}</div> : null}
+              {!artifactError && artifactLoading ? <div className="mb-3 text-xs text-muted-foreground">Loading artifacts...</div> : null}
+              {!artifactError && !artifactLoading && selectedRunId && artifacts.length === 0 ? (
+                <div className="text-xs text-muted-foreground">No artifacts yet</div>
+              ) : null}
+              {!selectedRunId ? <div className="text-xs text-muted-foreground">No run selected</div> : null}
+              {!artifactError && !artifactLoading && selectedRunId && artifacts.length > 0 && visibleArtifacts.length === 0 ? (
+                <div className="text-xs text-muted-foreground">No artifacts match your search</div>
+              ) : null}
 
-                <div className="space-y-2">
-                  {selectedRunId
-                    ? artifacts.map((artifact) => (
-                        <a
-                          key={artifact}
-                          href={apiClient.artifactDownloadUrl(selectedRunId, artifact)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="flex items-center justify-between rounded-md border border-border bg-secondary/40 px-3 py-2 text-xs transition hover:bg-secondary"
-                        >
-                          <span className="truncate pr-2">{artifact}</span>
-                          <span className="shrink-0 text-primary">
-                            <Download className="h-4 w-4" />
+              <div className="space-y-2">
+                {selectedRunId
+                  ? visibleArtifacts.map((artifact) => (
+                      <button
+                        key={artifact.path}
+                        type="button"
+                        onClick={() => onDownloadArtifact(artifact.path)}
+                        className="flex w-full items-center justify-between rounded-md border border-border bg-secondary/40 px-3 py-2 text-xs transition hover:bg-secondary"
+                      >
+                        <span className="min-w-0 flex-1 pr-2 text-left">
+                          <span className="block truncate">{artifact.path}</span>
+                          <span className="block text-[10px] text-muted-foreground">
+                            {formatBytes(artifact.size)} · {artifact.modified_at > 0 ? new Date(artifact.modified_at * 1000).toLocaleString() : "unknown time"}
                           </span>
-                        </a>
-                      ))
-                    : null}
-                </div>
+                        </span>
+                        <span className="shrink-0 text-primary">
+                          {artifactDownloadingPath === artifact.path ? (
+                            <LoaderCircle className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                        </span>
+                      </button>
+                    ))
+                  : null}
+              </div>
               </CardContent>
             </Card>
           </motion.aside>

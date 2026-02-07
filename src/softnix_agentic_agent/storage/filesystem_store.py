@@ -81,6 +81,25 @@ class FilesystemStore:
         files = [str(p.relative_to(artifacts_dir)) for p in artifacts_dir.rglob("*") if p.is_file()]
         return sorted(files)
 
+    def list_artifact_entries(self, run_id: str) -> list[dict[str, Any]]:
+        artifacts_dir = self.run_dir(run_id) / "artifacts"
+        if not artifacts_dir.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for path in artifacts_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            entries.append(
+                {
+                    "path": str(path.relative_to(artifacts_dir)),
+                    "size": int(stat.st_size),
+                    "modified_at": stat.st_mtime,
+                }
+            )
+        entries.sort(key=lambda e: str(e["path"]))
+        return entries
+
     def resolve_artifact_path(self, run_id: str, artifact_path: str) -> Path:
         artifacts_dir = (self.run_dir(run_id) / "artifacts").resolve()
         target = (artifacts_dir / artifact_path).resolve()
@@ -106,6 +125,12 @@ class FilesystemStore:
         p = self.run_dir(run_id) / "events.log"
         with p.open("a", encoding="utf-8") as f:
             f.write(f"{utc_now_iso()} {message}\n")
+
+    def append_memory_audit(self, run_id: str, payload: dict[str, Any]) -> None:
+        p = self.run_dir(run_id) / "memory_audit.jsonl"
+        line = {"ts": utc_now_iso(), **payload}
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
     def request_cancel(self, run_id: str) -> None:
         state = self.read_state(run_id)

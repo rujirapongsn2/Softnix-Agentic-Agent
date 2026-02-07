@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 import shlex
 import subprocess
 from typing import Any
@@ -12,9 +13,17 @@ from softnix_agentic_agent.types import ActionResult
 
 
 class SafeActionExecutor:
-    def __init__(self, workspace: Path, safe_commands: list[str]) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        safe_commands: list[str],
+        command_timeout_sec: int = 30,
+        max_output_chars: int = 12000,
+    ) -> None:
         self.workspace = workspace.resolve()
         self.safe_commands = safe_commands
+        self.command_timeout_sec = command_timeout_sec
+        self.max_output_chars = max_output_chars
 
     def execute(self, action: dict[str, Any]) -> ActionResult:
         name = action.get("name", "")
@@ -26,8 +35,14 @@ class SafeActionExecutor:
                 return self._read_file(params)
             if name == "write_workspace_file":
                 return self._write_workspace_file(params)
+            if name == "write_file":
+                return self._write_workspace_file(params)
             if name == "run_safe_command":
                 return self._run_safe_command(params)
+            if name == "run_shell_command":
+                return self._run_safe_command(params)
+            if name == "run_python_code":
+                return self._run_python_code(params)
             if name == "web_fetch":
                 return self._web_fetch(params)
             return ActionResult(name=name, ok=False, output="", error=f"Action not allowed: {name}")
@@ -95,6 +110,7 @@ class SafeActionExecutor:
         if any(token in blocked_tokens for token in parts):
             raise ValueError("Command contains blocked token")
         if base == "rm":
+            parts = self._hydrate_rm_targets(parts, params)
             self._validate_rm_paths(parts)
 
         proc = subprocess.run(
@@ -102,13 +118,84 @@ class SafeActionExecutor:
             cwd=self.workspace,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=self.command_timeout_sec,
             check=False,
         )
-        output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
         if proc.returncode != 0:
             return ActionResult(name="run_safe_command", ok=False, output=output, error=f"exit_code={proc.returncode}")
         return ActionResult(name="run_safe_command", ok=True, output=output.strip())
+
+    def _hydrate_rm_targets(self, parts: list[str], params: dict[str, Any]) -> list[str]:
+        # Some plans produce "rm -f" and provide paths separately. Hydrate targets from params when needed.
+        targets: list[str] = []
+        treat_as_target = False
+        for token in parts[1:]:
+            if token == "--":
+                treat_as_target = True
+                continue
+            if not treat_as_target and token.startswith("-"):
+                continue
+            targets.append(token)
+        if targets:
+            return parts
+
+        extra_targets: list[str] = []
+        path = params.get("path")
+        if path is not None:
+            extra_targets.append(str(path))
+        paths = params.get("paths")
+        if isinstance(paths, list):
+            extra_targets.extend(str(x) for x in paths)
+        if not extra_targets:
+            return parts
+        return [*parts, *extra_targets]
+
+    def _run_python_code(self, params: dict[str, Any]) -> ActionResult:
+        code = str(params.get("code", "")).strip()
+        if not code:
+            raise ValueError("Missing code")
+
+        python_bin = str(params.get("python_bin", "python")).strip()
+        if not python_bin:
+            raise ValueError("Missing python_bin")
+        if python_bin not in self.safe_commands:
+            raise ValueError(f"Python binary is not allowlisted: {python_bin}")
+
+        args = params.get("args", [])
+        if args is None:
+            args = []
+        if not isinstance(args, list):
+            raise ValueError("args must be a list")
+        args = [str(x) for x in args]
+
+        rel_script_path = str(params.get("path", "")).strip()
+        if rel_script_path:
+            script_path = self._resolve_workspace_path(rel_script_path)
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            work_dir = self._resolve_workspace_path(".softnix_exec")
+            work_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".py", prefix="script_", dir=str(work_dir), delete=False, encoding="utf-8"
+            ) as tmp:
+                script_path = Path(tmp.name)
+                tmp.write(code)
+        if rel_script_path:
+            script_path.write_text(code, encoding="utf-8")
+
+        proc = subprocess.run(
+            [python_bin, str(script_path), *args],
+            cwd=self.workspace,
+            text=True,
+            capture_output=True,
+            timeout=self.command_timeout_sec,
+            check=False,
+        )
+        output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+        if proc.returncode != 0:
+            return ActionResult(name="run_python_code", ok=False, output=output, error=f"exit_code={proc.returncode}")
+        return ActionResult(name="run_python_code", ok=True, output=output.strip())
 
     def _validate_rm_paths(self, parts: list[str]) -> None:
         if len(parts) < 2:
@@ -160,3 +247,9 @@ class SafeActionExecutor:
             f"{text}"
         )
         return ActionResult(name="web_fetch", ok=True, output=output)
+
+    def _truncate_output(self, text: str) -> str:
+        if len(text) <= self.max_output_chars:
+            return text
+        clipped = text[: self.max_output_chars]
+        return f"{clipped}\n\n[truncated to {self.max_output_chars} chars]"
