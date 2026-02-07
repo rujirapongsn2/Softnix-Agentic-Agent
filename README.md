@@ -8,6 +8,7 @@ CLI-first agent framework ที่ทำงานตาม flow:
 - Skills มาตรฐาน `SKILL.md`
 - LLM Providers: `OpenAI`, `Claude`, `OpenAI-compatible custom endpoint`
 - Safe action execution (allowlist)
+- Core Memory แบบ markdown-first (`PROFILE.md`/`SESSION.md` + pending/inferred flow)
 - Local REST API facade สำหรับต่อยอด Desktop/Web
 
 ## โครงสร้างหลัก
@@ -17,6 +18,7 @@ CLI-first agent framework ที่ทำงานตาม flow:
 - `src/softnix_agentic_agent/agent/planner.py` เรียก LLM เพื่อวางแผน action
 - `src/softnix_agentic_agent/agent/executor.py` execute action แบบปลอดภัย
 - `src/softnix_agentic_agent/storage/filesystem_store.py` persist state/iterations/events
+- `src/softnix_agentic_agent/memory/*` memory store/service สำหรับ profile/session/pending memory
 - `src/softnix_agentic_agent/skills/*` parser/loader สำหรับ `SKILL.md`
 - `src/softnix_agentic_agent/providers/*` adapter ของ provider
 - `src/softnix_agentic_agent/api/app.py` REST facade
@@ -57,7 +59,8 @@ flowchart LR
 2. Agent Core เริ่ม `Agent Loop` และเรียก `Planner` เพื่อขอแผนจาก LLM Provider
 3. `Safe Action Executor` ทำ action ที่อนุญาตและเขียนไฟล์ใน workspace
 4. `FilesystemStore` บันทึก state/iterations/events/artifacts ต่อเนื่องทุก iteration
-5. API/Web UI อ่านสถานะล่าสุดและ timeline จาก run storage แบบ near real-time
+5. Core Memory update/resolve บริบทจาก `PROFILE.md`/`SESSION.md` แล้ว inject เข้า planner prompt
+6. API/Web UI อ่านสถานะล่าสุดและ timeline จาก run storage แบบ near real-time
 
 ## ติดตั้ง
 
@@ -178,6 +181,10 @@ VITE_SOFTNIX_API_KEY=
 2. กรอก task/provider/model แล้วกด `Start Run`
 3. ดู conversation timeline และใช้ปุ่ม `Cancel`/`Resume` ได้ตรงนี้เลย
 
+ข้อจำกัดปัจจุบันของ Web UI:
+- ยังไม่มีปุ่ม Confirm/Reject pending memory โดยตรงในหน้า UI
+- pending memory ตรวจได้ผ่าน API `GET /runs/{id}/memory/pending`
+
 ## Deployment Config
 
 มี deployment templates แยก environment สำหรับ backend/frontend ที่ `deploy/env/`
@@ -234,6 +241,7 @@ Action ที่รองรับในรุ่นแรก:
 - มี auto compact ต่อ iteration สำหรับลบ memory ที่หมดอายุและ deduplicate key ซ้ำใน `PROFILE.md`/`SESSION.md`
 - audit การเปลี่ยน memory ถูกเก็บที่ `.softnix/runs/<run_id>/memory_audit.jsonl`
 - `POLICY.md` ถูกออกแบบให้เป็น admin-managed only และอยู่นอก user workspace path ปกติ
+- มี endpoint ตรวจ pending memory: `GET /runs/{run_id}/memory/pending`
 
 ### One-click test script
 
@@ -251,4 +259,5 @@ cd /Volumes/Seagate/myapp/Softnix-Agentic-Agent
 
 ## หมายเหตุสำหรับ Desktop/Web
 
-รุ่นนี้ยังไม่สร้าง UI แต่โครงสร้าง core และ REST contract พร้อมสำหรับนำไปต่อยอดเป็น Desktop Application และ Web Application
+รุ่นปัจจุบันมี Web UI ใช้งานได้แล้วสำหรับ run/timeline/artifacts และการควบคุม run พื้นฐาน
+โดย memory confirmation flow ยังใช้แนวทางผ่าน task text/API เป็นหลัก
