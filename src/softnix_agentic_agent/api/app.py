@@ -95,13 +95,14 @@ def create_run(payload: RunCreateRequest) -> dict:
 
 @app.get("/runs")
 def list_runs() -> dict:
-    items = []
+    states = []
     for run_id in reversed(_store.list_run_ids()):
         try:
-            items.append(_store.read_state(run_id).to_dict())
+            states.append(_store.read_state(run_id))
         except FileNotFoundError:
             continue
-    return {"items": items}
+    states.sort(key=lambda s: (s.updated_at or s.created_at or "", s.created_at or ""), reverse=True)
+    return {"items": [s.to_dict() for s in states]}
 
 
 @app.get("/runs/{run_id}")

@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.backend
+    env_file:
+      - ./local/backend.staging.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+      start_period: 15s
+    ports:
+      - "8787:8787"
+    restart: always
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.frontend
+    env_file:
+      - ./local/frontend.staging.env
+    command: ["/bin/sh", "-lc", "npm run build && npm run preview -- --host 0.0.0.0 --port 4173"]
+    ports:
+      - "4173:4173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always

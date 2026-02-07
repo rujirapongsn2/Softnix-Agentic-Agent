@@ -55,3 +55,27 @@ def test_state_roundtrip_enum(tmp_path: Path) -> None:
     store.init_run(state)
     loaded = store.read_state("r2")
     assert loaded.status == RunStatus.COMPLETED
+
+
+def test_snapshot_workspace_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    created = workspace / "sub" / "demo.txt"
+    created.parent.mkdir(parents=True, exist_ok=True)
+    created.write_text("hello", encoding="utf-8")
+
+    store = FilesystemStore(tmp_path / "runs")
+    state = RunState(
+        run_id="r3",
+        task="t3",
+        provider="openai",
+        model="m",
+        workspace=str(workspace),
+        skills_dir=str(workspace),
+        max_iters=1,
+    )
+    store.init_run(state)
+
+    rel = store.snapshot_workspace_file("r3", workspace, "sub/demo.txt")
+    assert rel == "sub/demo.txt"
+    assert "sub/demo.txt" in store.list_artifacts("r3")

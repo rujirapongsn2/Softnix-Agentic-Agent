@@ -1,9 +1,9 @@
 SOFTNIX_PROVIDER=openai
 SOFTNIX_MODEL=gpt-4o-mini
 SOFTNIX_MAX_ITERS=10
-SOFTNIX_WORKSPACE=/srv/softnix/workspace
-SOFTNIX_RUNS_DIR=/srv/softnix/data/runs
-SOFTNIX_SKILLS_DIR=/srv/softnix/skills
+SOFTNIX_WORKSPACE=/var/lib/softnix/workspace
+SOFTNIX_RUNS_DIR=/var/lib/softnix/runs
+SOFTNIX_SKILLS_DIR=/var/lib/softnix/skills
 SOFTNIX_SAFE_COMMANDS=ls,pwd,cat,echo,python,pytest,rm
 
 # Security

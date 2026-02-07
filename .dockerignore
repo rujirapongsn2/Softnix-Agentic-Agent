@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.softnix
+tmp
+web-ui/node_modules
+web-ui/dist
+node_modules
+.DS_Store

@@ -29,13 +29,14 @@ function setLastEventId(runId: string, id: string): void {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const authHeaders = API_KEY ? { "x-api-key": API_KEY } : {};
+  const authHeaders: Record<string, string> = API_KEY ? { "x-api-key": API_KEY } : {};
+  const extraHeaders: Record<string, string> = (init?.headers ?? {}) as Record<string, string>;
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
       ...authHeaders,
-      ...(init?.headers ?? {})
+      ...extraHeaders
     }
   });
 
@@ -67,6 +68,22 @@ export const apiClient = {
 
   getRunEvents(runId: string): Promise<{ items: string[] }> {
     return request(`/runs/${runId}/events`);
+  },
+
+  getRunArtifacts(runId: string): Promise<{ items: string[] }> {
+    return request(`/artifacts/${runId}`);
+  },
+
+  artifactDownloadUrl(runId: string, artifactPath: string): string {
+    const encodedPath = artifactPath
+      .split("/")
+      .map((part) => encodeURIComponent(part))
+      .join("/");
+    const url = new URL(`${API_BASE}/artifacts/${encodeURIComponent(runId)}/${encodedPath}`);
+    if (API_KEY) {
+      url.searchParams.set("api_key", API_KEY);
+    }
+    return url.toString();
   },
 
   cancelRun(runId: string): Promise<{ status: string }> {

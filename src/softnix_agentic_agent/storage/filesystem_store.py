@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 
 from softnix_agentic_agent.types import IterationRecord, RunState, utc_now_iso
@@ -86,6 +87,20 @@ class FilesystemStore:
         if not str(target).startswith(str(artifacts_dir)):
             raise ValueError("artifact path escapes artifacts directory")
         return target
+
+    def snapshot_workspace_file(self, run_id: str, workspace: Path, file_path: str) -> str:
+        workspace_root = workspace.resolve()
+        source = (workspace_root / file_path).resolve()
+        if not str(source).startswith(str(workspace_root)):
+            raise ValueError("workspace file path escapes workspace")
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(f"workspace file not found: {source}")
+
+        rel = str(source.relative_to(workspace_root))
+        dest = self.run_dir(run_id) / "artifacts" / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        return rel
 
     def log_event(self, run_id: str, message: str) -> None:
         p = self.run_dir(run_id) / "events.log"

@@ -69,3 +69,35 @@ def test_loop_max_iters(tmp_path: Path) -> None:
 
     assert state.stop_reason == StopReason.MAX_ITERS
     assert state.iteration == 2
+
+
+def test_loop_write_workspace_file_is_snapshotted_as_artifact(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "1111.text", "content": "ok"},
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="create file",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert "1111.text" in store.list_artifacts(state.run_id)

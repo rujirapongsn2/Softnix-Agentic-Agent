@@ -107,6 +107,7 @@ class AgentLoopRunner:
                             "error": result.error,
                         }
                     )
+                self._snapshot_artifacts(state, actions, action_results)
 
                 done = bool(plan.get("done", False))
                 output = str(plan.get("final_output") or "")
@@ -169,3 +170,20 @@ class AgentLoopRunner:
             self.store.write_state(state)
             self.store.log_event(state.run_id, f"error: {exc}")
             return state
+
+    def _snapshot_artifacts(self, state: RunState, actions: list[dict[str, Any]], action_results: list[dict[str, Any]]) -> None:
+        workspace = Path(state.workspace)
+        for action, result in zip(actions, action_results):
+            if action.get("name") != "write_workspace_file":
+                continue
+            if not bool(result.get("ok")):
+                continue
+            params = action.get("params", {}) if isinstance(action.get("params"), dict) else {}
+            raw_path = params.get("path") or params.get("file_path")
+            if raw_path is None:
+                continue
+            try:
+                rel = self.store.snapshot_workspace_file(state.run_id, workspace, str(raw_path))
+                self.store.log_event(state.run_id, f"artifact saved: {rel}")
+            except Exception as exc:
+                self.store.log_event(state.run_id, f"artifact snapshot failed: {exc}")

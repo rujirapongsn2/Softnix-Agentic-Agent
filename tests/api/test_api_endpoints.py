@@ -170,3 +170,46 @@ def test_api_requires_key_when_configured(monkeypatch, tmp_path: Path) -> None:
 
     health = client.get("/health")
     assert health.status_code == 200
+
+
+def test_runs_are_sorted_by_latest_updated_at(monkeypatch, tmp_path: Path) -> None:
+    from softnix_agentic_agent.api import app as app_module
+
+    settings = Settings(runs_dir=tmp_path / "runs", workspace=tmp_path, skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+
+    old_state = RunState(
+        run_id="oldrun",
+        task="old task",
+        provider="openai",
+        model="m",
+        workspace=str(tmp_path),
+        skills_dir=str(tmp_path),
+        max_iters=1,
+        created_at="2026-02-07T01:00:00+00:00",
+        updated_at="2026-02-07T01:00:00+00:00",
+    )
+    new_state = RunState(
+        run_id="newrun",
+        task="new task",
+        provider="openai",
+        model="m",
+        workspace=str(tmp_path),
+        skills_dir=str(tmp_path),
+        max_iters=1,
+        created_at="2026-02-07T02:00:00+00:00",
+        updated_at="2026-02-07T02:00:00+00:00",
+    )
+    store.init_run(old_state)
+    store.init_run(new_state)
+
+    monkeypatch.setattr(app_module, "_settings", settings)
+    monkeypatch.setattr(app_module, "_store", store)
+    monkeypatch.setattr(app_module, "_threads", {})
+
+    client = TestClient(app_module.app)
+    resp = client.get("/runs")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert items[0]["run_id"] == "newrun"
+    assert items[1]["run_id"] == "oldrun"

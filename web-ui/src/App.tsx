@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bot, LoaderCircle, PauseCircle, PlayCircle, SendHorizontal } from "lucide-react";
+import { Activity, Bot, Download, LoaderCircle, PauseCircle, PlayCircle, SendHorizontal } from "lucide-react";
 
 import { MarkdownStream } from "@/components/ai-elements/markdown-stream";
 import { MessageBubble } from "@/components/ai-elements/message-bubble";
@@ -47,6 +47,7 @@ export function App() {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  const [artifacts, setArtifacts] = useState<string[]>([]);
   const [health, setHealth] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [task, setTask] = useState("Write html javascript for landing page portfolio");
   const [provider, setProvider] = useState("claude");
@@ -54,6 +55,8 @@ export function App() {
   const [maxIters, setMaxIters] = useState(10);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
+  const [showArtifacts, setShowArtifacts] = useState(true);
 
   const streamRef = useRef<EventSource | null>(null);
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
@@ -69,6 +72,7 @@ export function App() {
   useEffect(() => {
     if (!selectedRunId) return;
     streamRef.current?.close();
+    void refreshArtifacts(selectedRunId);
 
     streamRef.current = streamRun(selectedRunId, {
       onState: (state) => {
@@ -81,8 +85,11 @@ export function App() {
       },
       onIteration: (item) => pushTimeline({ id: `i-${Date.now()}`, kind: "iteration", item }),
       onEvent: (evt) => pushTimeline({ id: `e-${Date.now()}`, kind: "event", text: evt.message }),
-      onDone: () => void refreshRunsOnly(),
-      onError: () => setError("Stream disconnected. You can refresh run detail.")
+      onDone: async () => {
+        await refreshRunsOnly();
+        await refreshArtifacts(selectedRunId);
+      },
+      onError: () => void handleStreamError()
     });
 
     return () => streamRef.current?.close();
@@ -117,6 +124,15 @@ export function App() {
     setHealth(res.providers);
   }
 
+  async function handleStreamError() {
+    try {
+      await apiClient.getHealth();
+      setError(null);
+    } catch {
+      setError("Stream disconnected. You can refresh run detail.");
+    }
+  }
+
   async function hydrateTimeline(runId: string) {
     const [events, iterations] = await Promise.all([apiClient.getRunEvents(runId), apiClient.getRunIterations(runId)]);
 
@@ -125,6 +141,17 @@ export function App() {
       ...iterations.items.map((item, idx) => ({ id: `iter-${idx}`, kind: "iteration" as const, item }))
     ];
     setTimeline(merged);
+  }
+
+  async function refreshArtifacts(runId: string) {
+    try {
+      setArtifactError(null);
+      const res = await apiClient.getRunArtifacts(runId);
+      setArtifacts(res.items);
+    } catch (e) {
+      setArtifacts([]);
+      setArtifactError((e as Error).message);
+    }
   }
 
   function pushTimeline(item: TimelineItem) {
@@ -143,7 +170,7 @@ export function App() {
       });
       await refreshRunsOnly();
       setSelectedRunId(created.run_id);
-      await hydrateTimeline(created.run_id);
+      await Promise.all([hydrateTimeline(created.run_id), refreshArtifacts(created.run_id)]);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -178,7 +205,7 @@ export function App() {
         <Card className="h-full border-0 shadow-float">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
-              <Bot className="h-5 w-5 text-primary" /> Softnix Agent
+              <Bot className="h-5 w-5 text-primary" /> Softnix Agentic
             </CardTitle>
             <div className="text-xs text-muted-foreground">Backend: {apiClient.baseUrl}</div>
           </CardHeader>
@@ -197,7 +224,11 @@ export function App() {
                 value={maxIters}
                 onChange={(e) => setMaxIters(Number(e.target.value || 10))}
               />
-              <Button className="w-full" onClick={onCreateRun} disabled={pending}>
+              <Button
+                className="w-full bg-[#2786C2] text-white hover:bg-[#1F6CB0] focus-visible:ring-[#1F6CB0]"
+                onClick={onCreateRun}
+                disabled={pending}
+              >
                 {pending ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <SendHorizontal className="mr-2 h-4 w-4" />} Start Run
               </Button>
               {pending ? (
@@ -224,7 +255,7 @@ export function App() {
                     )}
                     onClick={async () => {
                       setSelectedRunId(run.run_id);
-                      await hydrateTimeline(run.run_id);
+                      await Promise.all([hydrateTimeline(run.run_id), refreshArtifacts(run.run_id)]);
                     }}
                   >
                     <div className="mb-1 font-semibold">{run.run_id}</div>
@@ -269,7 +300,7 @@ export function App() {
         </Card>
       </aside>
 
-      <main className="col-span-12 lg:col-span-9">
+      <main className={cn("col-span-12", showArtifacts ? "lg:col-span-6" : "lg:col-span-9")}>
         <Card className="h-full border-0 bg-white/85 shadow-float backdrop-blur">
           <CardHeader className="flex flex-row items-center justify-between">
             <div>
@@ -289,6 +320,9 @@ export function App() {
                   ) : null}
                 </div>
             <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setShowArtifacts((prev) => !prev)}>
+                {showArtifacts ? "Hide Artifacts" : "Show Artifacts"}
+              </Button>
               <Button variant="secondary" size="sm" onClick={onResumeRun} disabled={!selectedRunId}>
                 <PlayCircle className="mr-1 h-4 w-4" /> Resume
               </Button>
@@ -340,6 +374,54 @@ export function App() {
           </CardContent>
         </Card>
       </main>
+
+      <AnimatePresence initial={false}>
+        {showArtifacts ? (
+          <motion.aside
+            key="artifacts-sidebar"
+            className="col-span-12 lg:col-span-3"
+            initial={{ opacity: 0, x: 36 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 36 }}
+            transition={{ duration: 0.22, ease: "easeOut" }}
+          >
+            <Card className="h-full border-0 shadow-float">
+              <CardHeader>
+                <CardTitle className="text-lg">Artifacts</CardTitle>
+                <div className="text-xs text-muted-foreground">
+                  {selectedRun ? `Run: ${selectedRun.run_id}` : "Select a run to view artifacts"}
+                </div>
+              </CardHeader>
+              <CardContent>
+                {artifactError ? <div className="mb-3 text-xs text-red-600">{artifactError}</div> : null}
+                {!artifactError && selectedRunId && artifacts.length === 0 ? (
+                  <div className="text-xs text-muted-foreground">No artifacts yet</div>
+                ) : null}
+                {!selectedRunId ? <div className="text-xs text-muted-foreground">No run selected</div> : null}
+
+                <div className="space-y-2">
+                  {selectedRunId
+                    ? artifacts.map((artifact) => (
+                        <a
+                          key={artifact}
+                          href={apiClient.artifactDownloadUrl(selectedRunId, artifact)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-center justify-between rounded-md border border-border bg-secondary/40 px-3 py-2 text-xs transition hover:bg-secondary"
+                        >
+                          <span className="truncate pr-2">{artifact}</span>
+                          <span className="shrink-0 text-primary">
+                            <Download className="h-4 w-4" />
+                          </span>
+                        </a>
+                      ))
+                    : null}
+                </div>
+              </CardContent>
+            </Card>
+          </motion.aside>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }

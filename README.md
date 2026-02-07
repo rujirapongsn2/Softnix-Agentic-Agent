@@ -145,6 +145,9 @@ VITE_SOFTNIX_API_KEY=
 - `deploy/env/frontend.prod.template`
 
 ดูขั้นตอนใช้งานทั้งหมดที่ `deploy/README.md`
+และไฟล์ compose พร้อมใช้ที่:
+- `deploy/docker-compose.dev.yml`
+- `deploy/docker-compose.staging.yml`
 
 ## รูปแบบไฟล์ Persistence
 
