@@ -4,15 +4,7 @@
 
 ## P0 (ต้องทำก่อน)
 
-1. Run/Timeline correctness (Web UI)
-- เป้าหมาย: ให้ RUNS และ Conversation Timeline อ้างอิง run ล่าสุดถูกต้องเสมอ
-- งานหลัก:
-  - ยืนยันการเรียง runs ด้วย `updated_at` จาก backend
-  - เพิ่ม frontend guards ตอนสลับ run ระหว่าง stream
-  - เพิ่ม test กรณี race condition (select run + stream reconnect)
-- ผลลัพธ์: ผู้ใช้เห็นข้อมูลล่าสุดตรงกับ run ที่เลือก 100%
-
-2. Artifacts UX parity (Web UI)
+1. Artifacts UX parity (Web UI)
 - เป้าหมาย: ใช้งาน artifacts ได้ครบเท่า desktop/CLI
 - งานหลัก:
   - เพิ่ม metadata (size, modified time)
@@ -20,7 +12,7 @@
   - เพิ่มสถานะ `downloading/empty/error` ที่ชัดเจน
 - ผลลัพธ์: ค้นหาและดาวน์โหลดไฟล์ผลลัพธ์ได้เร็วและแม่นยำ
 
-3. Core Memory design (Spec + Contracts)
+2. Core Memory design (Spec + Contracts)
 - เป้าหมาย: ออกแบบ Memory ใน Agent Core โดยยังไม่ลง implementation เต็ม
 - งานหลัก:
   - กำหนด model: `Session`, `Profile`, `Policy`
@@ -29,7 +21,7 @@
   - กำหนด filesystem contract สำหรับ memory store รุ่นแรก
 - ผลลัพธ์: ได้ spec ที่ decision-complete พร้อมส่งต่อ implement
 
-4. Autonomous code execution framework (No special-purpose tools)
+3. Autonomous code execution framework (No special-purpose tools)
 - เป้าหมาย: ให้ Agent วิเคราะห์ วางแผน เขียนโค้ด และรันโค้ดแบบอิสระเพื่อทำงานจนจบ โดยไม่เพิ่ม tool เฉพาะ domain
 - งานหลัก:
   - สร้าง execution runtime/sandbox สำหรับรันโค้ด (resource limits: cpu/memory/timeout/disk)
@@ -42,7 +34,7 @@
 
 ## P1 (ทำต่อหลัง P0)
 
-5. CI/CD pipeline
+4. CI/CD pipeline
 - เป้าหมาย: คุมคุณภาพอัตโนมัติทุก PR/Push
 - งานหลัก:
   - backend: `pytest`
@@ -50,7 +42,7 @@
   - deployment: `docker compose config`
 - ผลลัพธ์: ลด regression ก่อน merge
 
-6. Monitoring/alerts for long-running runs
+5. Monitoring/alerts for long-running runs
 - เป้าหมาย: มองเห็นปัญหา run ค้าง/timeout/provider error ได้เร็ว
 - งานหลัก:
   - timeout threshold
@@ -59,7 +51,7 @@
   - alert output (เริ่มจาก log/webhook)
 - ผลลัพธ์: ดูแลระบบง่ายขึ้นและลดเวลาตรวจ incident
 
-7. Authentication model for production
+6. Authentication model for production
 - เป้าหมาย: ยกระดับจาก static API key ไป session/token
 - งานหลัก:
   - token/session lifecycle
@@ -69,7 +61,7 @@
 
 ## P2 (เสริมความแข็งแรง)
 
-8. Security hardening phase 2
+7. Security hardening phase 2
 - เป้าหมาย: เพิ่ม defense-in-depth
 - งานหลัก:
   - rate limiting
@@ -77,7 +69,7 @@
   - request id tracing
 - ผลลัพธ์: สืบสวนปัญหาและป้องกัน abuse ได้ดีขึ้น
 
-9. Release package and runbook
+8. Release package and runbook
 - เป้าหมาย: ทำให้ทีม deploy/operate ได้มาตรฐาน
 - งานหลัก:
   - versioning + changelog
