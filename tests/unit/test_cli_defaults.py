@@ -38,7 +38,7 @@ def test_resolve_run_options_prefers_cli_values() -> None:
         model="gpt-4o-mini",
         max_iters=3,
         workspace=Path("./tmp"),
-        skills_dir=Path("examples/skills"),
+        skills_dir=Path("skillpacks"),
     )
 
     assert resolved["provider"] == "openai"

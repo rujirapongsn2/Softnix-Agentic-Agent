@@ -86,6 +86,7 @@ pip install -e '.[dev]'
 - `SOFTNIX_CORS_ALLOW_CREDENTIALS` (`true`/`false`)
 - `SOFTNIX_EXEC_TIMEOUT_SEC` timeout ต่อ action ที่รันคำสั่ง/โค้ด
 - `SOFTNIX_MAX_ACTION_OUTPUT_CHARS` จำกัดขนาด output ต่อ action
+- `SOFTNIX_WEB_FETCH_TLS_VERIFY` เปิด/ปิด TLS certificate verification สำหรับ `web_fetch` (default `true`)
 - `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `PROFILE.md`)
 - `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `SESSION.md`)
 - `SOFTNIX_MEMORY_POLICY_PATH` path ของ global policy memory (admin-managed only)
@@ -97,7 +98,7 @@ pip install -e '.[dev]'
 ### 1) Run task
 
 ```bash
-softnix run --task "Build a Python course" --provider openai --max-iters 10 --workspace . --skills-dir examples/skills
+softnix run --task "Build a Python course" --provider openai --max-iters 10 --workspace . --skills-dir skillpacks
 ```
 
 ### 2) Resume run เดิม
@@ -109,7 +110,7 @@ softnix resume --run-id <run_id>
 ### 3) List skills
 
 ```bash
-softnix skills list --path examples/skills
+softnix skills list --path skillpacks
 ```
 
 ### 4) เปิด API

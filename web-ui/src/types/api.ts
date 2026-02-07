@@ -15,6 +15,7 @@ export interface RunState {
   updated_at?: string;
   last_output?: string;
   cancel_requested?: boolean;
+  selected_skills?: string[];
 }
 
 export interface RunCreatePayload {

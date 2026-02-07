@@ -12,7 +12,7 @@ class Settings:
     max_iters: int = 10
     workspace: Path = Path(".")
     runs_dir: Path = Path(".softnix/runs")
-    skills_dir: Path = Path("examples/skills")
+    skills_dir: Path = Path("skillpacks")
     safe_commands: list[str] = None  # type: ignore[assignment]
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
@@ -26,6 +26,7 @@ class Settings:
     cors_allow_credentials: bool = True
     exec_timeout_sec: int = 30
     max_action_output_chars: int = 12000
+    web_fetch_tls_verify: bool = True
     memory_profile_file: str = "PROFILE.md"
     memory_session_file: str = "SESSION.md"
     memory_policy_path: Path = Path(".softnix/system/POLICY.md")
@@ -60,7 +61,7 @@ def load_settings() -> Settings:
         max_iters=int(os.getenv("SOFTNIX_MAX_ITERS", "10")),
         workspace=Path(os.getenv("SOFTNIX_WORKSPACE", ".")).resolve(),
         runs_dir=Path(os.getenv("SOFTNIX_RUNS_DIR", ".softnix/runs")),
-        skills_dir=Path(os.getenv("SOFTNIX_SKILLS_DIR", "examples/skills")),
+        skills_dir=Path(os.getenv("SOFTNIX_SKILLS_DIR", "skillpacks")),
         safe_commands=safe_commands,
         openai_api_key=os.getenv("SOFTNIX_OPENAI_API_KEY"),
         openai_base_url=os.getenv("SOFTNIX_OPENAI_BASE_URL", "https://api.openai.com/v1"),
@@ -74,6 +75,8 @@ def load_settings() -> Settings:
         cors_allow_credentials=cors_allow_credentials,
         exec_timeout_sec=int(os.getenv("SOFTNIX_EXEC_TIMEOUT_SEC", "30")),
         max_action_output_chars=int(os.getenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", "12000")),
+        web_fetch_tls_verify=os.getenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", "true").lower()
+        in {"1", "true", "yes", "on"},
         memory_profile_file=os.getenv("SOFTNIX_MEMORY_PROFILE_FILE", "PROFILE.md"),
         memory_session_file=os.getenv("SOFTNIX_MEMORY_SESSION_FILE", "SESSION.md"),
         memory_policy_path=Path(os.getenv("SOFTNIX_MEMORY_POLICY_PATH", ".softnix/system/POLICY.md")),

@@ -53,17 +53,20 @@ def test_security_config_from_env(tmp_path: Path, monkeypatch) -> None:
 def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".env").write_text(
         "SOFTNIX_EXEC_TIMEOUT_SEC=45\n"
-        "SOFTNIX_MAX_ACTION_OUTPUT_CHARS=5000\n",
+        "SOFTNIX_MAX_ACTION_OUTPUT_CHARS=5000\n"
+        "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n",
         encoding="utf-8",
     )
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("SOFTNIX_EXEC_TIMEOUT_SEC", raising=False)
     monkeypatch.delenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", raising=False)
+    monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
 
     settings = load_settings()
     assert settings.exec_timeout_sec == 45
     assert settings.max_action_output_chars == 5000
+    assert settings.web_fetch_tls_verify is False
 
 
 def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:

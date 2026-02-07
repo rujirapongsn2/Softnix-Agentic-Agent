@@ -39,3 +39,25 @@ def test_loader_lists_skills(tmp_path: Path) -> None:
     items = loader.list_skills()
     assert len(items) == 1
     assert items[0].name == "one"
+
+
+def test_loader_select_skills_returns_ranked_subset(tmp_path: Path) -> None:
+    web = tmp_path / "web-summary"
+    web.mkdir(parents=True)
+    (web / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website by url
+---
+Use for web summary tasks.
+""",
+        encoding="utf-8",
+    )
+    other = tmp_path / "local-ops"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text("File ops only", encoding="utf-8")
+
+    loader = SkillLoader(tmp_path)
+    selected = loader.select_skills(task="สรุปเว็บ https://example.com", limit=1)
+    assert len(selected) == 1
+    assert selected[0].name == "web-summary"

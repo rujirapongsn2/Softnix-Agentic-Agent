@@ -95,6 +95,7 @@ class AgentLoopRunner:
             safe_commands=self.settings.safe_commands,
             command_timeout_sec=self.settings.exec_timeout_sec,
             max_output_chars=self.settings.max_action_output_chars,
+            web_fetch_tls_verify=self.settings.web_fetch_tls_verify,
         )
 
         try:
@@ -132,7 +133,13 @@ class AgentLoopRunner:
                     return state
 
                 current_iteration = state.iteration + 1
-                skills_context = skill_loader.render_compact_context()
+                selected_skills = skill_loader.select_skills(task=state.task)
+                if selected_skills:
+                    selected_names = ",".join(skill.name for skill in selected_skills)
+                else:
+                    selected_names = "(none)"
+                self.store.log_event(state.run_id, f"skills selected iteration={current_iteration} names={selected_names}")
+                skills_context = skill_loader.render_compact_context(task=state.task)
                 memory_context = memory.build_prompt_context(max_items=self.settings.memory_prompt_max_items)
                 plan, token_usage, prompt_text = self.planner.build_plan(
                     task=state.task,
@@ -222,22 +229,33 @@ class AgentLoopRunner:
 
     def _snapshot_artifacts(self, state: RunState, actions: list[dict[str, Any]], action_results: list[dict[str, Any]]) -> None:
         workspace = Path(state.workspace)
+        snapshotted: set[str] = set()
         for action, result in zip(actions, action_results):
             action_name = str(action.get("name", ""))
             result_name = str(result.get("name", ""))
-            if action_name not in {"write_workspace_file", "write_file"} and result_name != "write_workspace_file":
-                continue
             if not bool(result.get("ok")):
                 continue
             params = action.get("params", {}) if isinstance(action.get("params"), dict) else {}
+            candidate_paths: list[str] = []
             raw_path = params.get("path") or params.get("file_path")
-            if raw_path is None:
-                continue
-            try:
-                rel = self.store.snapshot_workspace_file(state.run_id, workspace, str(raw_path))
-                self.store.log_event(state.run_id, f"artifact saved: {rel}")
-            except Exception as exc:
-                self.store.log_event(state.run_id, f"artifact snapshot failed: {exc}")
+            if raw_path is not None and (
+                action_name in {"write_workspace_file", "write_file"} or result_name == "write_workspace_file"
+            ):
+                candidate_paths.append(str(raw_path))
+
+            output = str(result.get("output") or "")
+            if output:
+                candidate_paths.extend(self._extract_existing_file_targets_from_text(output, workspace))
+
+            for raw in candidate_paths:
+                try:
+                    rel = self.store.snapshot_workspace_file(state.run_id, workspace, str(raw))
+                    if rel in snapshotted:
+                        continue
+                    snapshotted.add(rel)
+                    self.store.log_event(state.run_id, f"artifact saved: {rel}")
+                except Exception as exc:
+                    self.store.log_event(state.run_id, f"artifact snapshot failed: {exc}")
 
     def _prepare_action(self, action: dict[str, Any], task: str, workspace: Path) -> dict[str, Any]:
         prepared = copy.deepcopy(action)
@@ -293,6 +311,27 @@ class AgentLoopRunner:
             if target.exists() and target.is_file():
                 safe_targets.append(str(target.relative_to(root)))
         # preserve order, deduplicate
+        seen = set()
+        uniq = []
+        for t in safe_targets:
+            if t in seen:
+                continue
+            seen.add(t)
+            uniq.append(t)
+        return uniq
+
+    def _extract_existing_file_targets_from_text(self, text: str, workspace: Path) -> list[str]:
+        if not text.strip():
+            return []
+        candidates = re.findall(r"([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)", text)
+        safe_targets: list[str] = []
+        root = workspace.resolve()
+        for raw in candidates:
+            target = (root / raw).resolve()
+            if not str(target).startswith(str(root)):
+                continue
+            if target.exists() and target.is_file():
+                safe_targets.append(str(target.relative_to(root)))
         seen = set()
         uniq = []
         for t in safe_targets:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import secrets
 import threading
 import time
@@ -26,7 +27,7 @@ class RunCreateRequest(BaseModel):
     model: str | None = None
     max_iters: int = Field(default=10, ge=1)
     workspace: str | None = None
-    skills_dir: str = "examples/skills"
+    skills_dir: str = "skillpacks"
 
 
 app = FastAPI(title="Softnix Agentic Agent API", version="0.1.0")
@@ -73,6 +74,37 @@ def _background_resume(run_id: str) -> None:
     runner.resume_run(run_id)
 
 
+_SKILLS_EVENT_RE = re.compile(r"skills selected iteration=\d+ names=(.+)$")
+
+
+def _parse_selected_skills(events: list[str]) -> list[str]:
+    for event in reversed(events):
+        marker = _SKILLS_EVENT_RE.search(event)
+        if not marker:
+            continue
+        raw = marker.group(1).strip()
+        if not raw or raw == "(none)":
+            return []
+        names = [x.strip() for x in raw.split(",") if x.strip()]
+        # preserve order, deduplicate
+        uniq: list[str] = []
+        seen = set()
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            uniq.append(name)
+        return uniq
+    return []
+
+
+def _state_payload(state, events: list[str] | None = None) -> dict:
+    payload = state.to_dict()
+    run_events = events if events is not None else _store.read_events(state.run_id)
+    payload["selected_skills"] = _parse_selected_skills(run_events)
+    return payload
+
+
 @app.post("/runs")
 def create_run(payload: RunCreateRequest) -> dict:
     runner = build_runner(_settings, provider_name=payload.provider, model=payload.model)
@@ -104,13 +136,14 @@ def list_runs() -> dict:
         except FileNotFoundError:
             continue
     states.sort(key=lambda s: (s.updated_at or s.created_at or "", s.created_at or ""), reverse=True)
-    return {"items": [s.to_dict() for s in states]}
+    return {"items": [_state_payload(s) for s in states]}
 
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict:
     try:
-        return _store.read_state(run_id).to_dict()
+        state = _store.read_state(run_id)
+        return _state_payload(state)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="run not found") from exc
 
@@ -178,11 +211,12 @@ def stream_run(
                         changed = True
                 sent_iteration = state.iteration
 
-            state_data = state.to_dict()
+            run_events = _store.read_events(run_id)
+            state_data = _state_payload(state, events=run_events)
             state_sig = (
                 f"{state_data['status']}|{state_data['stop_reason']}|"
                 f"{state_data['iteration']}|{state_data['updated_at']}|"
-                f"{state_data['cancel_requested']}"
+                f"{state_data['cancel_requested']}|{','.join(state_data.get('selected_skills', []))}"
             )
             if state_sig != last_state_sig:
                 payload = emit("state", state_data)
@@ -191,7 +225,6 @@ def stream_run(
                     changed = True
                 last_state_sig = state_sig
 
-            run_events = _store.read_events(run_id)
             if len(run_events) > sent_event_count:
                 for msg in run_events[sent_event_count:]:
                     payload = emit("event", {"message": msg})
@@ -201,7 +234,7 @@ def stream_run(
                 sent_event_count = len(run_events)
 
             if state.status.value in {"completed", "failed", "canceled"}:
-                payload = emit("done", state.to_dict())
+                payload = emit("done", _state_payload(state, events=run_events))
                 if payload is not None:
                     yield payload
                 break

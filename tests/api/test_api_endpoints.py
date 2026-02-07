@@ -66,11 +66,13 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     assert r.status_code == 200
     run_id = r.json()["run_id"]
     assert r.json()["workspace"] == str(tmp_path)
+    store.log_event(run_id, "skills selected iteration=1 names=web-summary,sample-skill")
 
     r2 = client.get(f"/runs/{run_id}")
     assert r2.status_code == 200
     assert r2.json()["run_id"] == run_id
     assert r2.json()["workspace"] == str(tmp_path)
+    assert r2.json().get("selected_skills") == ["web-summary", "sample-skill"]
     assert r2.headers.get("x-content-type-options") == "nosniff"
     assert r2.headers.get("x-frame-options") == "DENY"
 
@@ -108,6 +110,7 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     r_runs = client.get("/runs")
     assert r_runs.status_code == 200
     assert len(r_runs.json()["items"]) >= 1
+    assert r_runs.json()["items"][0].get("selected_skills") == ["web-summary", "sample-skill"]
 
     r_resume = client.post(f"/runs/{run_id}/resume")
     assert r_resume.status_code == 200

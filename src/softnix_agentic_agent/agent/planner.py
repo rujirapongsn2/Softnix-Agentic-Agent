@@ -28,6 +28,10 @@ Rules:
 - For file actions, always use params.path (not file_path).
 - Use paths relative to workspace (e.g. "index.html", "assets/app.js"), never absolute paths.
 - For web fetch, use params.url with full http/https URL.
+- For tasks that ask to summarize/analyze a website or include an http/https URL:
+  - Prefer `web_fetch` first, then summarize from fetched content.
+  - Avoid `run_python_code` unless the user explicitly asks to write/execute Python.
+  - Do not rely on external Python packages (e.g. requests/bs4) for basic webpage summarization.
 - For run_python_code:
   - use params.code as full Python script
   - optional params.path for script path under workspace

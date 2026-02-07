@@ -73,10 +73,11 @@ def test_web_fetch_success_with_mock(tmp_path: Path, monkeypatch) -> None:
         def raise_for_status(self) -> None:
             return None
 
-    def _fake_get(url, timeout, follow_redirects):  # type: ignore[no-untyped-def]
+    def _fake_get(url, timeout, follow_redirects, verify):  # type: ignore[no-untyped-def]
         assert url == "https://example.com"
         assert timeout == 15.0
         assert follow_redirects is True
+        assert verify is True
         return _Resp()
 
     monkeypatch.setattr(httpx, "get", _fake_get)

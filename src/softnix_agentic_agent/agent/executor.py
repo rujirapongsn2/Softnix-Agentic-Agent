@@ -19,11 +19,13 @@ class SafeActionExecutor:
         safe_commands: list[str],
         command_timeout_sec: int = 30,
         max_output_chars: int = 12000,
+        web_fetch_tls_verify: bool = True,
     ) -> None:
         self.workspace = workspace.resolve()
         self.safe_commands = safe_commands
         self.command_timeout_sec = command_timeout_sec
         self.max_output_chars = max_output_chars
+        self.web_fetch_tls_verify = bool(web_fetch_tls_verify)
 
     def execute(self, action: dict[str, Any]) -> ActionResult:
         name = action.get("name", "")
@@ -232,8 +234,23 @@ class SafeActionExecutor:
 
         timeout_sec = float(params.get("timeout_sec", 15))
         max_chars = int(params.get("max_chars", 12000))
+        verify_tls = params.get("verify_tls")
+        if verify_tls is None:
+            verify = self.web_fetch_tls_verify
+        else:
+            verify = str(verify_tls).strip().lower() in {"1", "true", "yes", "on"}
 
-        resp = httpx.get(url, timeout=timeout_sec, follow_redirects=True)
+        try:
+            resp = httpx.get(url, timeout=timeout_sec, follow_redirects=True, verify=verify)
+        except httpx.ConnectError as exc:
+            msg = str(exc)
+            if "CERTIFICATE_VERIFY_FAILED" in msg and verify:
+                raise ValueError(
+                    "SSL certificate verify failed. "
+                    "Set SOFTNIX_WEB_FETCH_TLS_VERIFY=false for this environment "
+                    "or pass params.verify_tls=false in web_fetch action."
+                ) from exc
+            raise
         resp.raise_for_status()
 
         text = resp.text or ""

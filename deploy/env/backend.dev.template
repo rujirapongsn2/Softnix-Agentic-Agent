@@ -3,7 +3,7 @@ SOFTNIX_MODEL=gpt-4o-mini
 SOFTNIX_MAX_ITERS=10
 SOFTNIX_WORKSPACE=./tmp
 SOFTNIX_RUNS_DIR=.softnix/runs
-SOFTNIX_SKILLS_DIR=examples/skills
+SOFTNIX_SKILLS_DIR=skillpacks
 SOFTNIX_SAFE_COMMANDS=ls,pwd,cat,echo,python,pytest,rm
 
 # Security

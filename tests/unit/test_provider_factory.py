@@ -16,7 +16,7 @@ def _settings() -> Settings:
         max_iters=5,
         workspace=Path("."),
         runs_dir=Path(".softnix/runs"),
-        skills_dir=Path("examples/skills"),
+        skills_dir=Path("skillpacks"),
         safe_commands=["ls"],
         openai_api_key="x",
         claude_api_key="y",

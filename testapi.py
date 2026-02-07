@@ -125,7 +125,7 @@ def main() -> int:
     parser.add_argument("--provider", default="claude")
     parser.add_argument("--model", default="claude-haiku-4-5")
     parser.add_argument("--workspace", default="./tmp")
-    parser.add_argument("--skills-dir", default="examples/skills")
+    parser.add_argument("--skills-dir", default="skillpacks")
     args = parser.parse_args()
 
     return run_tests(

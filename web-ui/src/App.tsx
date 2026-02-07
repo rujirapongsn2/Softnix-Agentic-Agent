@@ -298,6 +298,11 @@ export function App() {
                   >
                     <div className="mb-1 font-semibold">{run.run_id}</div>
                     <div className="line-clamp-2 text-muted-foreground">{run.task}</div>
+                    {Array.isArray(run.selected_skills) && run.selected_skills.length > 0 ? (
+                      <div className="mt-2 line-clamp-1 text-[10px] text-primary">
+                        skills: {run.selected_skills.join(", ")}
+                      </div>
+                    ) : null}
                     <div className="mt-2 flex items-center justify-between">
                       <Badge variant={run.status === "failed" ? "danger" : "muted"}>{run.status}</Badge>
                       <span className="text-[10px] text-muted-foreground">iter {run.iteration}</span>
@@ -346,6 +351,9 @@ export function App() {
                   <div className="text-xs text-muted-foreground">
                     {selectedRun ? `${selectedRun.run_id} · ${selectedRun.status} · updated ${formatTime(selectedRun.updated_at)}` : "No run selected"}
                   </div>
+                  {selectedRun && Array.isArray(selectedRun.selected_skills) && selectedRun.selected_skills.length > 0 ? (
+                    <div className="mt-1 text-[11px] text-primary">skills: {selectedRun.selected_skills.join(", ")}</div>
+                  ) : null}
                   {isSelectedRunRunning ? (
                     <motion.div
                       initial={{ opacity: 0 }}

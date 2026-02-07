@@ -135,6 +135,44 @@ def test_loop_write_file_alias_is_snapshotted_as_artifact(tmp_path: Path) -> Non
     assert "result.txt" in store.list_artifacts(state.run_id)
 
 
+def test_loop_run_python_code_output_file_is_snapshotted_as_artifact(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {
+                            "code": (
+                                "from pathlib import Path\n"
+                                "Path('softnix_logger_summary.md').write_text('ok', encoding='utf-8')\n"
+                                "print('created softnix_logger_summary.md')\n"
+                            )
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="create summary via python",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert "softnix_logger_summary.md" in store.list_artifacts(state.run_id)
+
+
 def test_loop_autofills_rm_targets_from_task_when_missing(tmp_path: Path) -> None:
     script = tmp_path / "script.py"
     result = tmp_path / "result.txt"
@@ -176,3 +214,37 @@ def test_loop_autofills_rm_targets_from_task_when_missing(tmp_path: Path) -> Non
     assert state.stop_reason == StopReason.COMPLETED
     assert script.exists() is False
     assert result.exists() is False
+
+
+def test_loop_logs_selected_skills_in_events(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "web-summary"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website content
+---
+
+Use this skill when task contains URL and asks summary.
+""",
+        encoding="utf-8",
+    )
+
+    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยสรุปข้อมูล https://example.com",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("skills selected iteration=1 names=web-summary" in e for e in events)

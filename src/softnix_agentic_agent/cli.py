@@ -85,7 +85,7 @@ def resume(run_id: str = typer.Option(..., "--run-id")) -> None:
 
 
 @skills_app.command("list")
-def list_skills(path: Path = typer.Option(Path("examples/skills"), "--path")) -> None:
+def list_skills(path: Path = typer.Option(Path("skillpacks"), "--path")) -> None:
     loader = SkillLoader(path)
     skills = loader.list_skills()
     if not skills:
