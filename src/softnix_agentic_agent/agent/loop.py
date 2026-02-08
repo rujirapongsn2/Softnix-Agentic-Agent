@@ -113,14 +113,18 @@ class AgentLoopRunner:
                     self.store.log_event(state.run_id, f"memory staged entries={len(memory_staged)}")
 
             while state.iteration < state.max_iters:
-                compact_stats = memory.compact(["profile", "session"])
-                if compact_stats["removed_expired"] or compact_stats["removed_duplicates"]:
-                    self.store.log_event(
-                        state.run_id,
-                        "memory compact "
-                        f"expired={compact_stats['removed_expired']} "
-                        f"duplicates={compact_stats['removed_duplicates']}",
-                    )
+                try:
+                    compact_stats = memory.compact(["profile", "session"])
+                    if compact_stats["removed_expired"] or compact_stats["removed_duplicates"]:
+                        self.store.log_event(
+                            state.run_id,
+                            "memory compact "
+                            f"expired={compact_stats['removed_expired']} "
+                            f"duplicates={compact_stats['removed_duplicates']}",
+                        )
+                except Exception as exc:
+                    memory.record_compact_failure(str(exc))
+                    self.store.log_event(state.run_id, f"alert: memory compact failed error={exc}")
 
                 latest = self.store.read_state(state.run_id)
                 if latest.cancel_requested:
@@ -154,6 +158,30 @@ class AgentLoopRunner:
                 action_results = []
                 for action in actions:
                     prepared_action = self._prepare_action(action, state.task, Path(state.workspace))
+                    action_name = str(prepared_action.get("name", ""))
+                    if not self._is_action_allowed_by_policy(action_name, memory):
+                        error = f"blocked by policy.allow.tools: {action_name}"
+                        result_payload = {
+                            "name": action_name,
+                            "ok": False,
+                            "output": "",
+                            "error": error,
+                        }
+                        action_results.append(result_payload)
+                        self.store.log_event(state.run_id, f"policy blocked action name={action_name}")
+                        self.store.append_memory_audit(
+                            state.run_id,
+                            {
+                                "op": "policy_block",
+                                "scope": "policy",
+                                "key": "policy.allow.tools",
+                                "action": action_name,
+                                "actor": "system",
+                                "reason": error,
+                            },
+                        )
+                        continue
+
                     result = executor.execute(prepared_action)
                     action_results.append(
                         {
@@ -164,6 +192,21 @@ class AgentLoopRunner:
                         }
                     )
                 self._snapshot_artifacts(state, actions, action_results)
+
+                memory_metrics = memory.collect_metrics(
+                    pending_alert_threshold=self.settings.memory_pending_alert_threshold
+                )
+                self.store.log_event(
+                    state.run_id,
+                    f"memory metrics pending_count={memory_metrics['pending_count']}",
+                )
+                if memory_metrics["pending_backlog_alert"]:
+                    self.store.log_event(
+                        state.run_id,
+                        "alert: memory pending backlog "
+                        f"{memory_metrics['pending_count']} >= "
+                        f"{memory_metrics['pending_alert_threshold']}",
+                    )
 
                 done = bool(plan.get("done", False))
                 output = str(plan.get("final_output") or "")
@@ -340,3 +383,18 @@ class AgentLoopRunner:
             seen.add(t)
             uniq.append(t)
         return uniq
+
+    def _is_action_allowed_by_policy(self, action_name: str, memory: CoreMemoryService) -> bool:
+        allowed = memory.get_policy_allow_tools()
+        if allowed is None:
+            return True
+        normalized = self._normalize_action_name(action_name)
+        return normalized in allowed
+
+    def _normalize_action_name(self, name: str) -> str:
+        raw = (name or "").strip().lower()
+        aliases = {
+            "write_file": "write_workspace_file",
+            "run_shell_command": "run_safe_command",
+        }
+        return aliases.get(raw, raw)

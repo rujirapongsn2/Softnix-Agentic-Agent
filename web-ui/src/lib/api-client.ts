@@ -1,7 +1,16 @@
-import type { ArtifactEntry, RunCreatePayload, RunState, SkillItem } from "@/types/api";
+import type {
+  ArtifactEntry,
+  MemoryMetrics,
+  PendingMemoryItem,
+  PolicyReloadResult,
+  RunCreatePayload,
+  RunState,
+  SkillItem
+} from "@/types/api";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8787";
 const API_KEY = import.meta.env.VITE_SOFTNIX_API_KEY ?? "";
+const MEMORY_ADMIN_KEY = import.meta.env.VITE_SOFTNIX_MEMORY_ADMIN_KEY ?? "";
 const STREAM_RETRY_MS = 1000;
 
 const runLastEventIds = new Map<string, string>();
@@ -70,6 +79,28 @@ export const apiClient = {
     return request(`/runs/${runId}/events`);
   },
 
+  getPendingMemory(runId: string): Promise<{ items: PendingMemoryItem[] }> {
+    return request(`/runs/${runId}/memory/pending`);
+  },
+
+  getMemoryMetrics(runId: string): Promise<MemoryMetrics> {
+    return request(`/runs/${runId}/memory/metrics`);
+  },
+
+  confirmPendingMemory(runId: string, key: string, reason = ""): Promise<{ status: string }> {
+    return request(`/runs/${runId}/memory/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ key, reason })
+    });
+  },
+
+  rejectPendingMemory(runId: string, key: string, reason = ""): Promise<{ status: string }> {
+    return request(`/runs/${runId}/memory/reject`, {
+      method: "POST",
+      body: JSON.stringify({ key, reason })
+    });
+  },
+
   getRunArtifacts(runId: string): Promise<{ items: string[]; entries?: ArtifactEntry[] }> {
     return request(`/artifacts/${runId}`);
   },
@@ -104,6 +135,19 @@ export const apiClient = {
 
   getSystemConfig(): Promise<Record<string, unknown>> {
     return request("/system/config");
+  },
+
+  hasMemoryAdminKey(): boolean {
+    return Boolean(MEMORY_ADMIN_KEY);
+  },
+
+  reloadMemoryPolicy(): Promise<PolicyReloadResult> {
+    const headers: Record<string, string> = {};
+    if (MEMORY_ADMIN_KEY) headers["x-memory-admin-key"] = MEMORY_ADMIN_KEY;
+    return request("/admin/memory/policy/reload", {
+      method: "POST",
+      headers
+    });
   }
 };
 

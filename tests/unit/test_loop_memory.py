@@ -24,6 +24,19 @@ class CaptureProvider(LLMProvider):
         return ProviderStatus(ok=True, message="ok")
 
 
+class ActionProvider(LLMProvider):
+    def __init__(self, action_name: str, params: dict | None = None) -> None:
+        self.action_name = action_name
+        self.params = params or {}
+
+    def generate(self, messages, model, tools=None, temperature=0.2, max_tokens=1024):  # type: ignore[override]
+        data = {"done": True, "final_output": "done", "actions": [{"name": self.action_name, "params": self.params}]}
+        return LLMResponse(content=json.dumps(data), usage={"total_tokens": 1})
+
+    def healthcheck(self) -> ProviderStatus:
+        return ProviderStatus(ok=True, message="ok")
+
+
 def test_loop_applies_memory_from_task_and_injects_to_prompt(tmp_path: Path) -> None:
     provider = CaptureProvider()
     planner = Planner(provider=provider, model="m")
@@ -48,7 +61,7 @@ def test_loop_applies_memory_from_task_and_injects_to_prompt(tmp_path: Path) -> 
     assert state.stop_reason == StopReason.COMPLETED
     assert "response.tone=concise" in provider.last_user_prompt
 
-    profile = (tmp_path / "PROFILE.md").read_text(encoding="utf-8")
+    profile = (tmp_path / "memory" / "PROFILE.md").read_text(encoding="utf-8")
     assert "response.tone" in profile
 
     audit_path = tmp_path / "runs" / state.run_id / "memory_audit.jsonl"
@@ -78,8 +91,74 @@ def test_loop_stages_inferred_memory_as_pending(tmp_path: Path) -> None:
     )
 
     assert state.stop_reason == StopReason.COMPLETED
-    session = (tmp_path / "SESSION.md").read_text(encoding="utf-8")
+    session = (tmp_path / "memory" / "SESSION.md").read_text(encoding="utf-8")
     assert "memory.pending.response.verbosity" in session
 
     # pending memory should not be injected as effective preference yet
     assert "memory.pending.response.verbosity" not in provider.last_user_prompt
+
+
+def test_loop_blocks_action_by_policy_allow_tools(tmp_path: Path) -> None:
+    provider = ActionProvider(action_name="write_workspace_file", params={"path": "x.txt", "content": "x"})
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        memory_policy_path=tmp_path / "system" / "POLICY.md",
+    )
+    (tmp_path / "system").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "system" / "POLICY.md").write_text(
+        "# POLICY\n\n## Guardrails\n"
+        "- key:policy.allow.tools | value:list_dir | kind:constraint | priority:100 | ttl:none | source:admin | updated_at:2026-02-07T00:00:00Z\n",
+        encoding="utf-8",
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="create file",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert (tmp_path / "x.txt").exists() is False
+
+    iterations = store.read_iterations(state.run_id)
+    action_results = iterations[0]["action_results"]
+    assert action_results[0]["ok"] is False
+    assert "blocked by policy.allow.tools" in action_results[0]["error"]
+
+    events = store.read_events(state.run_id)
+    assert any("policy blocked action" in e for e in events)
+
+
+def test_loop_logs_pending_backlog_alert(tmp_path: Path) -> None:
+    provider = CaptureProvider()
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        memory_policy_path=tmp_path / "system" / "POLICY.md",
+        memory_pending_alert_threshold=1,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยสรุปสั้นๆ",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("memory metrics pending_count=1" in e for e in events)
+    assert any("alert: memory pending backlog 1 >= 1" in e for e in events)

@@ -31,7 +31,7 @@ def test_apply_user_text_writes_profile_memory(tmp_path: Path) -> None:
     changes = svc.apply_user_text("จำไว้ว่า response.tone = professional")
     assert len(changes) == 1
 
-    profile = (tmp_path / "PROFILE.md").read_text(encoding="utf-8")
+    profile = (tmp_path / "memory" / "PROFILE.md").read_text(encoding="utf-8")
     assert "response.tone" in profile
     assert "professional" in profile
 
@@ -42,7 +42,7 @@ def test_apply_user_text_supports_ttl_suffix(tmp_path: Path) -> None:
     changes = svc.apply_user_text("remember response.verbosity = concise for 8h")
     assert len(changes) == 1
 
-    profile = (tmp_path / "PROFILE.md").read_text(encoding="utf-8")
+    profile = (tmp_path / "memory" / "PROFILE.md").read_text(encoding="utf-8")
     assert "response.verbosity" in profile
     assert "ttl:8h" in profile
 
@@ -73,7 +73,7 @@ def test_resolve_effective_prefers_policy_then_profile_then_session(tmp_path: Pa
 def test_compact_removes_expired_and_duplicate_rows(tmp_path: Path) -> None:
     svc = _make_service(tmp_path)
 
-    profile = tmp_path / "PROFILE.md"
+    profile = tmp_path / "memory" / "PROFILE.md"
     profile.write_text(
         "# PROFILE\n\n## Preferences\n"
         "- key:response.tone | value:old | kind:preference | priority:60 | ttl:1h | source:user_explicit | updated_at:2024-01-01T00:00:00Z\n"
@@ -98,7 +98,7 @@ def test_stage_inferred_preferences_creates_pending_entries(tmp_path: Path) -> N
     staged = svc.stage_inferred_preferences("ช่วยสรุปสั้นๆ และขอเป็นข้อๆ")
     assert len(staged) == 2
 
-    session_text = (tmp_path / "SESSION.md").read_text(encoding="utf-8")
+    session_text = (tmp_path / "memory" / "SESSION.md").read_text(encoding="utf-8")
     assert "memory.pending.response.verbosity" in session_text
     assert "memory.pending.response.format.default" in session_text
 
@@ -111,11 +111,11 @@ def test_confirm_pending_promotes_to_profile(tmp_path: Path) -> None:
     assert len(changes) == 1
     assert changes[0]["op"] == "promote_pending"
 
-    profile_text = (tmp_path / "PROFILE.md").read_text(encoding="utf-8")
+    profile_text = (tmp_path / "memory" / "PROFILE.md").read_text(encoding="utf-8")
     assert "response.verbosity" in profile_text
     assert "concise" in profile_text
 
-    session_text = (tmp_path / "SESSION.md").read_text(encoding="utf-8")
+    session_text = (tmp_path / "memory" / "SESSION.md").read_text(encoding="utf-8")
     assert "memory.pending.response.verbosity" not in session_text
 
 
@@ -127,7 +127,7 @@ def test_reject_pending_removes_entry(tmp_path: Path) -> None:
     assert len(changes) == 1
     assert changes[0]["op"] == "reject_pending"
 
-    session_text = (tmp_path / "SESSION.md").read_text(encoding="utf-8")
+    session_text = (tmp_path / "memory" / "SESSION.md").read_text(encoding="utf-8")
     assert "memory.pending.response.verbosity" not in session_text
 
 
@@ -158,3 +158,36 @@ def test_list_pending_returns_session_pending_rows(tmp_path: Path) -> None:
     items = svc.list_pending()
     assert len(items) == 1
     assert items[0]["target_key"] == "response.verbosity"
+
+
+def test_apply_pending_decision_confirm_and_reject(tmp_path: Path) -> None:
+    svc = _make_service(tmp_path)
+    svc.stage_inferred_preferences("ขอสั้นๆ")
+
+    confirmed = svc.apply_pending_decision("confirm", "response.verbosity", reason="api confirm")
+    assert confirmed is not None
+    assert confirmed["op"] == "promote_pending"
+
+    svc.stage_inferred_preferences("ขอสั้นๆ")
+    rejected = svc.apply_pending_decision("reject", "response.verbosity", reason="api reject")
+    assert rejected is not None
+    assert rejected["op"] == "reject_pending"
+
+
+def test_get_policy_allow_tools_and_metrics(tmp_path: Path) -> None:
+    svc = _make_service(tmp_path)
+    (tmp_path / "system" / "POLICY.md").write_text(
+        "# POLICY\n\n## Guardrails\n"
+        "- key:policy.allow.tools | value:list_dir,web_fetch,write_file | kind:constraint | priority:100 | ttl:none | source:admin | updated_at:2026-02-07T00:00:00Z\n",
+        encoding="utf-8",
+    )
+    svc.stage_inferred_preferences("ขอสั้นๆ")
+    svc.record_compact_failure("boom")
+
+    allowed = svc.get_policy_allow_tools()
+    assert allowed == {"list_dir", "web_fetch", "write_workspace_file"}
+
+    metrics = svc.collect_metrics(pending_alert_threshold=1)
+    assert metrics["pending_count"] == 1
+    assert metrics["pending_backlog_alert"] is True
+    assert metrics["compact_failures"] == 1

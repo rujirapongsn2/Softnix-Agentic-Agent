@@ -78,59 +78,82 @@ class CoreMemoryService:
             return []
 
         changes: list[dict[str, Any]] = []
-        pending_rows = self.store.load_scope("session")
-        pending_by_key = {canonical_key(x.key): x for x in pending_rows}
-
         for decision in decisions:
-            key = canonical_key(str(decision["key"]))
-            pending_key = f"memory.pending.{key}"
-            pending = pending_by_key.get(pending_key)
-            if pending is None:
-                continue
-
-            if decision["action"] == "confirm":
-                old_profile, new_profile = self.store.upsert(
-                    "profile",
-                    MemoryEntry(
-                        scope="profile",
-                        kind="preference",
-                        key=key,
-                        value=pending.value,
-                        priority=max(70, int(pending.priority)),
-                        ttl="none",
-                        source="user_explicit",
-                        updated_at=utc_now_iso(),
-                    ),
-                )
-                self.store.delete("session", pending_key)
-                payload = {
-                    "op": "promote_pending",
-                    "scope": "profile",
-                    "key": key,
-                    "old": old_profile.value if old_profile else None,
-                    "new": new_profile.value,
-                    "actor": "user_explicit",
-                    "reason": str(decision.get("reason", "")),
-                }
-                self.run_store.append_memory_audit(self.run_id, payload)
-                changes.append(payload)
-                continue
-
-            if decision["action"] == "reject":
-                removed = self.store.delete("session", pending_key)
-                payload = {
-                    "op": "reject_pending",
-                    "scope": "session",
-                    "key": pending_key,
-                    "old": removed.value if removed else None,
-                    "new": None,
-                    "actor": "user_explicit",
-                    "reason": str(decision.get("reason", "")),
-                }
-                self.run_store.append_memory_audit(self.run_id, payload)
-                changes.append(payload)
+            changed = self.apply_pending_decision(
+                action=str(decision.get("action", "")),
+                key=str(decision.get("key", "")),
+                reason=str(decision.get("reason", "")),
+                actor="user_explicit",
+            )
+            if changed is not None:
+                changes.append(changed)
 
         return changes
+
+    def apply_pending_decision(
+        self,
+        action: str,
+        key: str,
+        reason: str = "",
+        actor: str = "user_explicit",
+    ) -> dict[str, Any] | None:
+        normalized_action = (action or "").strip().lower()
+        if normalized_action not in {"confirm", "reject"}:
+            raise ValueError("action must be confirm|reject")
+
+        target_key = canonical_key(key)
+        if not target_key:
+            raise ValueError("key is required")
+
+        pending_key = f"memory.pending.{target_key}"
+        pending_rows = self.store.load_scope("session")
+        pending = None
+        for row in pending_rows:
+            if canonical_key(row.key) == pending_key:
+                pending = row
+                break
+        if pending is None:
+            return None
+
+        if normalized_action == "confirm":
+            old_profile, new_profile = self.store.upsert(
+                "profile",
+                MemoryEntry(
+                    scope="profile",
+                    kind="preference",
+                    key=target_key,
+                    value=pending.value,
+                    priority=max(70, int(pending.priority)),
+                    ttl="none",
+                    source=actor,
+                    updated_at=utc_now_iso(),
+                ),
+            )
+            self.store.delete("session", pending_key)
+            payload = {
+                "op": "promote_pending",
+                "scope": "profile",
+                "key": target_key,
+                "old": old_profile.value if old_profile else None,
+                "new": new_profile.value,
+                "actor": actor,
+                "reason": reason,
+            }
+            self.run_store.append_memory_audit(self.run_id, payload)
+            return payload
+
+        removed = self.store.delete("session", pending_key)
+        payload = {
+            "op": "reject_pending",
+            "scope": "session",
+            "key": pending_key,
+            "old": removed.value if removed else None,
+            "new": None,
+            "actor": actor,
+            "reason": reason,
+        }
+        self.run_store.append_memory_audit(self.run_id, payload)
+        return payload
 
     def stage_inferred_preferences(self, text: str) -> list[dict[str, Any]]:
         candidates = _extract_inferred_candidates(text)
@@ -190,6 +213,52 @@ class CoreMemoryService:
             )
         items.sort(key=lambda x: x["target_key"])
         return items
+
+    def get_policy_allow_tools(self) -> set[str] | None:
+        now = datetime.now(timezone.utc)
+        chosen: MemoryEntry | None = None
+        for entry in self.store.load_scope("policy"):
+            if entry.is_expired(now):
+                continue
+            if canonical_key(entry.key) != "policy.allow.tools":
+                continue
+            if chosen is None or _entry_is_better(entry, chosen):
+                chosen = entry
+
+        if chosen is None:
+            return None
+
+        tokens = [x.strip().lower() for x in str(chosen.value).split(",") if x.strip()]
+        normalized = {_normalize_action_name(token) for token in tokens}
+        return {x for x in normalized if x}
+
+    def collect_metrics(self, pending_alert_threshold: int = 10) -> dict[str, Any]:
+        pending_items = self.list_pending()
+        pending_count = len(pending_items)
+        threshold = max(0, int(pending_alert_threshold))
+        backlog_alert = pending_count >= threshold if threshold > 0 else False
+        compact_failures = 0
+        for row in self.run_store.read_memory_audit(self.run_id):
+            if str(row.get("op", "")).strip().lower() == "compact_failed":
+                compact_failures += 1
+        return {
+            "pending_count": pending_count,
+            "pending_alert_threshold": threshold,
+            "pending_backlog_alert": backlog_alert,
+            "compact_failures": compact_failures,
+            "policy_allow_tools": sorted(self.get_policy_allow_tools() or []),
+        }
+
+    def record_compact_failure(self, error: str) -> dict[str, Any]:
+        payload = {
+            "op": "compact_failed",
+            "scope": "profile,session",
+            "actor": "system",
+            "error": str(error),
+            "reason": "automatic cleanup failed",
+        }
+        self.run_store.append_memory_audit(self.run_id, payload)
+        return payload
 
     def compact(self, scopes: list[str] | None = None) -> dict[str, int]:
         target_scopes = scopes or ["profile", "session"]
@@ -486,3 +555,12 @@ def _extract_inferred_candidates(text: str) -> list[dict[str, Any]]:
         seen.add(key)
         out.append(row)
     return out
+
+
+def _normalize_action_name(name: str) -> str:
+    raw = (name or "").strip().lower()
+    aliases = {
+        "write_file": "write_workspace_file",
+        "run_shell_command": "run_safe_command",
+    }
+    return aliases.get(raw, raw)

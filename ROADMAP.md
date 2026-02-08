@@ -2,13 +2,13 @@
 
 เอกสารนี้สรุปแผนงานถัดไป โดยเรียงตามลำดับความสำคัญ (สูง -> ต่ำ)
 
-## สถานะล่าสุด (อัปเดต 2026-02-07)
+## สถานะล่าสุด (อัปเดต 2026-02-08)
 
 ### เสร็จแล้ว
 
 1. Core Memory design (Spec + Contracts) - Phase 1/2
 - ส่งมอบแล้ว:
-  - markdown-first memory (`PROFILE.md`, `SESSION.md`, global `POLICY.md`)
+  - markdown-first memory (`memory/PROFILE.md`, `memory/SESSION.md`, global `POLICY.md`)
   - precedence + resolve (`Policy > Profile > Session`)
   - explicit memory commands (`จำไว้ว่า...`, tone/style/language, forget)
   - inferred memory แบบ pending + confirm/reject ผ่าน task text
@@ -18,16 +18,27 @@
   - one-click test script: `scripts/test_core_memory_oneclick.sh`
 - เอกสารอ้างอิง: `docs/core-memory-spec.md`
 
+2. Core Memory hardening (Phase 3A)
+- ส่งมอบแล้ว:
+  - policy guard enforcement ตาม `policy.allow.tools` ใน execution loop
+  - explicit pending decision API:
+    - `POST /runs/{id}/memory/confirm`
+    - `POST /runs/{id}/memory/reject`
+  - Web UI flow สำหรับ confirm/reject pending memory
+  - memory observability endpoint:
+    - `GET /runs/{id}/memory/metrics`
+  - admin policy reload endpoint:
+    - `POST /admin/memory/policy/reload` (admin key)
+  - backlog alert และ compact failure audit/event logging
+
 ## P0 (ต้องทำก่อน)
 
-1. Core Memory hardening (Phase 3)
-- เป้าหมาย: ปิดช่องว่าง production-grade ของ memory governance และ UX
+1. Core Memory hardening (Phase 3B)
+- เป้าหมาย: ปิดงาน hardening ฝั่ง admin control plane ให้พร้อม production
 - งานหลัก:
-  - admin policy loader/hot reload ที่แยกสิทธิ์ชัดเจน
-  - guard enforcement ครบทุก execution path
-  - API/UX สำหรับ confirm/reject pending memory แบบ explicit (ไม่ต้องพึ่ง task text)
-  - memory observability เพิ่มเติม (metrics/alerts สำหรับ pending backlog และ compact failures)
-- ผลลัพธ์: memory subsystem พร้อมใช้งานจริงใน production และดูแลได้ง่าย
+  - admin policy control plane ที่รองรับ key rotation/secret store integration
+  - นโยบายสิทธิ์และ audit สำหรับ admin operations (reload/changes)
+- ผลลัพธ์: memory governance พร้อมใช้งาน production โดยมี admin boundary ชัดเจน
 
 2. Autonomous code execution framework (No special-purpose tools)
 - เป้าหมาย: ให้ Agent วิเคราะห์ วางแผน เขียนโค้ด และรันโค้ดแบบอิสระเพื่อทำงานจนจบ โดยไม่เพิ่ม tool เฉพาะ domain

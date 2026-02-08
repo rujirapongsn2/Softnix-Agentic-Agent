@@ -8,7 +8,7 @@ CLI-first agent framework ที่ทำงานตาม flow:
 - Skills มาตรฐาน `SKILL.md`
 - LLM Providers: `OpenAI`, `Claude`, `OpenAI-compatible custom endpoint`
 - Safe action execution (allowlist)
-- Core Memory แบบ markdown-first (`PROFILE.md`/`SESSION.md` + pending/inferred flow)
+- Core Memory แบบ markdown-first (`memory/PROFILE.md`/`memory/SESSION.md` + pending/inferred flow)
 - Local REST API facade สำหรับต่อยอด Desktop/Web
 
 ## โครงสร้างหลัก
@@ -59,7 +59,7 @@ flowchart LR
 2. Agent Core เริ่ม `Agent Loop` และเรียก `Planner` เพื่อขอแผนจาก LLM Provider
 3. `Safe Action Executor` ทำ action ที่อนุญาตและเขียนไฟล์ใน workspace
 4. `FilesystemStore` บันทึก state/iterations/events/artifacts ต่อเนื่องทุก iteration
-5. Core Memory update/resolve บริบทจาก `PROFILE.md`/`SESSION.md` แล้ว inject เข้า planner prompt
+5. Core Memory update/resolve บริบทจาก `memory/PROFILE.md`/`memory/SESSION.md` แล้ว inject เข้า planner prompt
 6. API/Web UI อ่านสถานะล่าสุดและ timeline จาก run storage แบบ near real-time
 
 ## ติดตั้ง
@@ -87,11 +87,13 @@ pip install -e '.[dev]'
 - `SOFTNIX_EXEC_TIMEOUT_SEC` timeout ต่อ action ที่รันคำสั่ง/โค้ด
 - `SOFTNIX_MAX_ACTION_OUTPUT_CHARS` จำกัดขนาด output ต่อ action
 - `SOFTNIX_WEB_FETCH_TLS_VERIFY` เปิด/ปิด TLS certificate verification สำหรับ `web_fetch` (default `true`)
-- `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `PROFILE.md`)
-- `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `SESSION.md`)
+- `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `memory/PROFILE.md`)
+- `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `memory/SESSION.md`)
 - `SOFTNIX_MEMORY_POLICY_PATH` path ของ global policy memory (admin-managed only)
 - `SOFTNIX_MEMORY_PROMPT_MAX_ITEMS` จำนวน memory items สูงสุดที่ inject เข้า planner prompt
 - `SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE` ค่าขั้นต่ำ (0-1) สำหรับ staging inferred memory
+- `SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD` จำนวน pending ขั้นต่ำที่จะเริ่ม log alert backlog
+- `SOFTNIX_MEMORY_ADMIN_KEY` คีย์สำหรับ admin-only memory endpoints (เช่น policy reload)
 
 ## การใช้งาน CLI
 
@@ -129,6 +131,10 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `GET /runs/{id}/stream?last_event_id=<n>` resume stream จาก event id ล่าสุด
 - `GET /runs/{id}/events` อ่าน events log
 - `GET /runs/{id}/memory/pending` อ่าน inferred pending memory ที่รอการยืนยัน
+- `POST /runs/{id}/memory/confirm` ยืนยัน pending memory ด้วย key แบบ explicit
+- `POST /runs/{id}/memory/reject` ปฏิเสธ pending memory ด้วย key แบบ explicit
+- `GET /runs/{id}/memory/metrics` อ่าน memory metrics (pending backlog / compact failures / policy tools)
+- `POST /admin/memory/policy/reload` trigger policy reload summary (ต้องใช้ `x-memory-admin-key`)
 - `POST /runs/{id}/cancel` ส่งคำขอหยุด run
 - `POST /runs/{id}/resume` สั่ง resume run
 - `GET /skills` อ่านรายการ skills
@@ -174,7 +180,11 @@ npm run dev
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:8787
 VITE_SOFTNIX_API_KEY=
+VITE_SOFTNIX_MEMORY_ADMIN_KEY=
 ```
+
+หมายเหตุ:
+- หากตั้ง `VITE_SOFTNIX_MEMORY_ADMIN_KEY` Web UI จะแสดงปุ่ม `Reload Policy` (เรียก `POST /admin/memory/policy/reload`)
 
 ### เข้าใช้งาน Web UI
 
@@ -183,8 +193,7 @@ VITE_SOFTNIX_API_KEY=
 3. ดู conversation timeline และใช้ปุ่ม `Cancel`/`Resume` ได้ตรงนี้เลย
 
 ข้อจำกัดปัจจุบันของ Web UI:
-- ยังไม่มีปุ่ม Confirm/Reject pending memory โดยตรงในหน้า UI
-- pending memory ตรวจได้ผ่าน API `GET /runs/{id}/memory/pending`
+- ยังไม่มีหน้าจัดการ policy admin (reload ยังเรียกผ่าน API)
 
 ## Deployment Config
 
@@ -232,17 +241,24 @@ Action ที่รองรับในรุ่นแรก:
 
 ## Core Memory (Markdown-first)
 
-- ระบบสร้างและใช้ `PROFILE.md` และ `SESSION.md` ใน workspace อัตโนมัติ
+- ระบบสร้างและใช้ `memory/PROFILE.md` และ `memory/SESSION.md` ใน workspace อัตโนมัติ
+- หากพบไฟล์เดิมที่ root (`PROFILE.md`/`SESSION.md`) ระบบจะย้ายเข้า `memory/` อัตโนมัติเมื่อเริ่ม run
 - รองรับคำสั่งจากผู้ใช้แบบธรรมชาติ เช่น `จำไว้ว่า response.tone = concise`
 - รองรับ TTL ในคำสั่งจำแบบ explicit เช่น `remember response.verbosity = concise for 8h`
 - รองรับ inferred preference แบบ pending (ยังไม่ commit ถาวร) จากข้อความเช่น `ขอสั้นๆ`, `ขอเป็นข้อๆ`
 - ยืนยัน pending ด้วย `ยืนยันให้จำ <key>` หรือยกเลิกด้วย `ไม่ต้องจำ <key>`
 - เฉพาะ inferred ที่มี confidence มากกว่าหรือเท่ากับ `SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE` เท่านั้นที่จะถูก stage
 - memory ที่ resolve แล้วจะถูก inject เข้า planner prompt ทุก iteration
-- มี auto compact ต่อ iteration สำหรับลบ memory ที่หมดอายุและ deduplicate key ซ้ำใน `PROFILE.md`/`SESSION.md`
+- มี auto compact ต่อ iteration สำหรับลบ memory ที่หมดอายุและ deduplicate key ซ้ำใน `memory/PROFILE.md`/`memory/SESSION.md`
 - audit การเปลี่ยน memory ถูกเก็บที่ `.softnix/runs/<run_id>/memory_audit.jsonl`
 - `POLICY.md` ถูกออกแบบให้เป็น admin-managed only และอยู่นอก user workspace path ปกติ
 - มี endpoint ตรวจ pending memory: `GET /runs/{run_id}/memory/pending`
+- มี endpoint ยืนยัน/ปฏิเสธ pending แบบ explicit:
+  - `POST /runs/{run_id}/memory/confirm`
+  - `POST /runs/{run_id}/memory/reject`
+- มี endpoint metrics สำหรับ observability: `GET /runs/{run_id}/memory/metrics`
+- support policy guard (`policy.allow.tools`) แบบ hot-reload ต่อ iteration และบล็อก action ที่ไม่ถูกอนุญาต
+- รองรับ admin policy reload endpoint: `POST /admin/memory/policy/reload` (ใช้ `SOFTNIX_MEMORY_ADMIN_KEY`)
 
 ### One-click test script
 

@@ -15,12 +15,12 @@
 1. `Profile Memory`
 - วัตถุประสงค์: ความชอบถาวรของผู้ใช้
 - ตัวอย่าง: tone, style, ภาษา, รูปแบบ output
-- ที่เก็บ: `<workspace>/PROFILE.md`
+- ที่เก็บ: `<workspace>/memory/PROFILE.md`
 
 2. `Session Memory`
 - วัตถุประสงค์: บริบทชั่วคราวของงาน/บทสนทนาปัจจุบัน
 - ตัวอย่าง: เป้าหมายรอบนี้, ข้อจำกัดชั่วคราว, ข้อมูลที่ใช้เฉพาะ run
-- ที่เก็บ: `<workspace>/SESSION.md`
+- ที่เก็บ: `<workspace>/memory/SESSION.md`
 
 3. `Policy Memory`
 - วัตถุประสงค์: กติการะดับระบบ

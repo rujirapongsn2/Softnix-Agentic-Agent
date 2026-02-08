@@ -149,9 +149,22 @@ start_backend_if_needed
 system_config=$(curl -sS "$API_BASE/system/config")
 workspace=$(json_get "workspace" "$system_config")
 [ -n "$workspace" ] || fail "workspace is empty from /system/config"
+profile_rel=$(json_get "memory_profile_file" "$system_config" 2>/dev/null || true)
+session_rel=$(json_get "memory_session_file" "$system_config" 2>/dev/null || true)
+[ -n "${profile_rel:-}" ] || profile_rel="memory/PROFILE.md"
+[ -n "${session_rel:-}" ] || session_rel="memory/SESSION.md"
 
-profile_file="$workspace/PROFILE.md"
-session_file="$workspace/SESSION.md"
+if [ "${profile_rel#/}" != "$profile_rel" ]; then
+  profile_file="$profile_rel"
+else
+  profile_file="$workspace/$profile_rel"
+fi
+
+if [ "${session_rel#/}" != "$session_rel" ]; then
+  session_file="$session_rel"
+else
+  session_file="$workspace/$session_rel"
+fi
 
 log "workspace=$workspace"
 mkdir -p "$workspace"

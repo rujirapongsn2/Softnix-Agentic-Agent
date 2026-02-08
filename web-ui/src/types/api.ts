@@ -38,6 +38,31 @@ export interface ArtifactEntry {
   modified_at: number;
 }
 
+export interface PendingMemoryItem {
+  pending_key: string;
+  target_key: string;
+  value: string;
+  priority: number;
+  source: string;
+  updated_at: string;
+}
+
+export interface MemoryMetrics {
+  pending_count: number;
+  pending_alert_threshold: number;
+  pending_backlog_alert: boolean;
+  compact_failures: number;
+  policy_allow_tools: string[];
+}
+
+export interface PolicyReloadResult {
+  status: string;
+  policy_path: string;
+  policy_entry_count: number;
+  policy_allow_tools: string[];
+  policy_modified_at: number;
+}
+
 export interface StreamEnvelope {
   event: string;
   data: unknown;

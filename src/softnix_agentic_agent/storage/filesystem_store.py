@@ -132,6 +132,21 @@ class FilesystemStore:
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
+    def read_memory_audit(self, run_id: str) -> list[dict[str, Any]]:
+        p = self.run_dir(run_id) / "memory_audit.jsonl"
+        if not p.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in p.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except json.JSONDecodeError:
+                continue
+        return rows
+
     def request_cancel(self, run_id: str) -> None:
         state = self.read_state(run_id)
         state.cancel_requested = True

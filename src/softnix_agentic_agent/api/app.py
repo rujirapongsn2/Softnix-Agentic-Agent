@@ -30,6 +30,11 @@ class RunCreateRequest(BaseModel):
     skills_dir: str = "skillpacks"
 
 
+class MemoryDecisionRequest(BaseModel):
+    key: str
+    reason: str | None = None
+
+
 app = FastAPI(title="Softnix Agentic Agent API", version="0.1.0")
 _settings = load_settings()
 _store = FilesystemStore(_settings.runs_dir)
@@ -256,9 +261,49 @@ def _safe_int(value: str | None) -> int:
         return 0
 
 
+def _require_memory_admin_key(x_memory_admin_key: str | None, query_key: str | None) -> None:
+    expected = _settings.memory_admin_key or ""
+    if not expected:
+        raise HTTPException(status_code=403, detail="memory admin key not configured")
+    provided = (x_memory_admin_key or query_key or "").strip()
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 @app.get("/runs/{run_id}/events")
 def get_events(run_id: str) -> dict:
     return {"items": _store.read_events(run_id)}
+
+
+@app.post("/admin/memory/policy/reload")
+def reload_memory_policy(
+    x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
+    memory_admin_key: str | None = Query(default=None),
+) -> dict:
+    _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    memory_store = MarkdownMemoryStore(
+        workspace=_settings.workspace,
+        policy_path=_settings.memory_policy_path,
+        profile_file=_settings.memory_profile_file,
+        session_file=_settings.memory_session_file,
+    )
+    memory = CoreMemoryService(
+        memory_store,
+        _store,
+        run_id="admin-policy-reload",
+        inferred_min_confidence=_settings.memory_inferred_min_confidence,
+    )
+    memory.ensure_ready()
+    policy_entries = memory_store.load_scope("policy")
+    allow_tools = sorted(memory.get_policy_allow_tools() or [])
+    policy_file = _settings.memory_policy_path.resolve()
+    return {
+        "status": "reloaded",
+        "policy_path": str(policy_file),
+        "policy_entry_count": len(policy_entries),
+        "policy_allow_tools": allow_tools,
+        "policy_modified_at": policy_file.stat().st_mtime if policy_file.exists() else 0,
+    }
 
 
 @app.get("/runs/{run_id}/memory/pending")
@@ -282,6 +327,84 @@ def get_pending_memory(run_id: str) -> dict:
     )
     memory.ensure_ready()
     return {"items": memory.list_pending()}
+
+
+@app.post("/runs/{run_id}/memory/confirm")
+def confirm_pending_memory(run_id: str, payload: MemoryDecisionRequest) -> dict:
+    try:
+        state = _store.read_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+
+    memory_store = MarkdownMemoryStore(
+        workspace=Path(state.workspace),
+        policy_path=_settings.memory_policy_path,
+        profile_file=_settings.memory_profile_file,
+        session_file=_settings.memory_session_file,
+    )
+    memory = CoreMemoryService(
+        memory_store,
+        _store,
+        run_id,
+        inferred_min_confidence=_settings.memory_inferred_min_confidence,
+    )
+    memory.ensure_ready()
+    changed = memory.apply_pending_decision(action="confirm", key=payload.key, reason=payload.reason or "")
+    if changed is None:
+        raise HTTPException(status_code=404, detail="pending memory not found")
+    _store.log_event(run_id, f"memory pending confirmed key={payload.key}")
+    return {"status": "confirmed", "item": changed}
+
+
+@app.post("/runs/{run_id}/memory/reject")
+def reject_pending_memory(run_id: str, payload: MemoryDecisionRequest) -> dict:
+    try:
+        state = _store.read_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+
+    memory_store = MarkdownMemoryStore(
+        workspace=Path(state.workspace),
+        policy_path=_settings.memory_policy_path,
+        profile_file=_settings.memory_profile_file,
+        session_file=_settings.memory_session_file,
+    )
+    memory = CoreMemoryService(
+        memory_store,
+        _store,
+        run_id,
+        inferred_min_confidence=_settings.memory_inferred_min_confidence,
+    )
+    memory.ensure_ready()
+    changed = memory.apply_pending_decision(action="reject", key=payload.key, reason=payload.reason or "")
+    if changed is None:
+        raise HTTPException(status_code=404, detail="pending memory not found")
+    _store.log_event(run_id, f"memory pending rejected key={payload.key}")
+    return {"status": "rejected", "item": changed}
+
+
+@app.get("/runs/{run_id}/memory/metrics")
+def get_memory_metrics(run_id: str) -> dict:
+    try:
+        state = _store.read_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+
+    memory_store = MarkdownMemoryStore(
+        workspace=Path(state.workspace),
+        policy_path=_settings.memory_policy_path,
+        profile_file=_settings.memory_profile_file,
+        session_file=_settings.memory_session_file,
+    )
+    memory = CoreMemoryService(
+        memory_store,
+        _store,
+        run_id,
+        inferred_min_confidence=_settings.memory_inferred_min_confidence,
+    )
+    memory.ensure_ready()
+    metrics = memory.collect_metrics(pending_alert_threshold=_settings.memory_pending_alert_threshold)
+    return metrics
 
 
 @app.post("/runs/{run_id}/cancel")
@@ -364,4 +487,11 @@ def system_config() -> dict:
         "skills_dir": str(_settings.skills_dir),
         "max_iters": _settings.max_iters,
         "safe_commands": _settings.safe_commands,
+        "memory_policy_path": str(_settings.memory_policy_path),
+        "memory_profile_file": _settings.memory_profile_file,
+        "memory_session_file": _settings.memory_session_file,
+        "memory_prompt_max_items": _settings.memory_prompt_max_items,
+        "memory_inferred_min_confidence": _settings.memory_inferred_min_confidence,
+        "memory_pending_alert_threshold": _settings.memory_pending_alert_threshold,
+        "memory_admin_configured": bool(_settings.memory_admin_key),
     }

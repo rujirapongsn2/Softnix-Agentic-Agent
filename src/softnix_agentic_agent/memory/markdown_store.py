@@ -12,8 +12,8 @@ class MarkdownMemoryStore:
         self,
         workspace: Path,
         policy_path: Path,
-        profile_file: str = "PROFILE.md",
-        session_file: str = "SESSION.md",
+        profile_file: str = "memory/PROFILE.md",
+        session_file: str = "memory/SESSION.md",
     ) -> None:
         self.workspace = workspace.resolve()
         self.profile_path = (self.workspace / profile_file).resolve()
@@ -24,6 +24,8 @@ class MarkdownMemoryStore:
         self.profile_path.parent.mkdir(parents=True, exist_ok=True)
         self.session_path.parent.mkdir(parents=True, exist_ok=True)
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._migrate_legacy_memory_files_if_needed()
 
         if not self.profile_path.exists():
             self.profile_path.write_text("# PROFILE\n\n## Preferences\n", encoding="utf-8")
@@ -106,6 +108,18 @@ class MarkdownMemoryStore:
         if scope == "policy":
             return self.policy_path
         raise ValueError(f"Unknown memory scope: {scope}")
+
+    def _migrate_legacy_memory_files_if_needed(self) -> None:
+        legacy_profile = (self.workspace / "PROFILE.md").resolve()
+        legacy_session = (self.workspace / "SESSION.md").resolve()
+
+        if self.profile_path != legacy_profile and (not self.profile_path.exists()) and legacy_profile.exists():
+            self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_profile.replace(self.profile_path)
+
+        if self.session_path != legacy_session and (not self.session_path.exists()) and legacy_session.exists():
+            self.session_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_session.replace(self.session_path)
 
 
 def _parse_memory_line(line: str, scope: str) -> MemoryEntry | None:

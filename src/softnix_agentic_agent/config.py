@@ -27,11 +27,13 @@ class Settings:
     exec_timeout_sec: int = 30
     max_action_output_chars: int = 12000
     web_fetch_tls_verify: bool = True
-    memory_profile_file: str = "PROFILE.md"
-    memory_session_file: str = "SESSION.md"
+    memory_profile_file: str = "memory/PROFILE.md"
+    memory_session_file: str = "memory/SESSION.md"
     memory_policy_path: Path = Path(".softnix/system/POLICY.md")
     memory_prompt_max_items: int = 20
     memory_inferred_min_confidence: float = 0.75
+    memory_pending_alert_threshold: int = 10
+    memory_admin_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.safe_commands is None:
@@ -77,11 +79,13 @@ def load_settings() -> Settings:
         max_action_output_chars=int(os.getenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", "12000")),
         web_fetch_tls_verify=os.getenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", "true").lower()
         in {"1", "true", "yes", "on"},
-        memory_profile_file=os.getenv("SOFTNIX_MEMORY_PROFILE_FILE", "PROFILE.md"),
-        memory_session_file=os.getenv("SOFTNIX_MEMORY_SESSION_FILE", "SESSION.md"),
+        memory_profile_file=os.getenv("SOFTNIX_MEMORY_PROFILE_FILE", "memory/PROFILE.md"),
+        memory_session_file=os.getenv("SOFTNIX_MEMORY_SESSION_FILE", "memory/SESSION.md"),
         memory_policy_path=Path(os.getenv("SOFTNIX_MEMORY_POLICY_PATH", ".softnix/system/POLICY.md")),
         memory_prompt_max_items=int(os.getenv("SOFTNIX_MEMORY_PROMPT_MAX_ITEMS", "20")),
         memory_inferred_min_confidence=float(os.getenv("SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE", "0.75")),
+        memory_pending_alert_threshold=int(os.getenv("SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD", "10")),
+        memory_admin_key=os.getenv("SOFTNIX_MEMORY_ADMIN_KEY"),
     )
 
 

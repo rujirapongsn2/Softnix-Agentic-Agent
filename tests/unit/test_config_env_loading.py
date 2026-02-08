@@ -75,7 +75,9 @@ def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_MEMORY_SESSION_FILE=MY_SESSION.md\n"
         "SOFTNIX_MEMORY_POLICY_PATH=.softnix/system/ORG_POLICY.md\n"
         "SOFTNIX_MEMORY_PROMPT_MAX_ITEMS=9\n"
-        "SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE=0.9\n",
+        "SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE=0.9\n"
+        "SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD=7\n"
+        "SOFTNIX_MEMORY_ADMIN_KEY=mem-admin\n",
         encoding="utf-8",
     )
 
@@ -85,6 +87,8 @@ def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_MEMORY_POLICY_PATH", raising=False)
     monkeypatch.delenv("SOFTNIX_MEMORY_PROMPT_MAX_ITEMS", raising=False)
     monkeypatch.delenv("SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_ADMIN_KEY", raising=False)
 
     settings = load_settings()
     assert settings.memory_profile_file == "MY_PROFILE.md"
@@ -92,3 +96,5 @@ def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert str(settings.memory_policy_path) == ".softnix/system/ORG_POLICY.md"
     assert settings.memory_prompt_max_items == 9
     assert settings.memory_inferred_min_confidence == 0.9
+    assert settings.memory_pending_alert_threshold == 7
+    assert settings.memory_admin_key == "mem-admin"

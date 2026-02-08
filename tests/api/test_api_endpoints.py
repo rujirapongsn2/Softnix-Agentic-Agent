@@ -45,7 +45,7 @@ class FakeRunner:
 def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     from softnix_agentic_agent.api import app as app_module
 
-    settings = Settings(runs_dir=tmp_path / "runs", workspace=tmp_path, skills_dir=tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs", workspace=tmp_path, skills_dir=tmp_path, memory_admin_key="admin-secret")
     store = FilesystemStore(settings.runs_dir)
 
     monkeypatch.setattr(app_module, "_settings", settings)
@@ -96,7 +96,8 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     assert r_events.status_code == 200
     assert isinstance(r_events.json()["items"], list)
 
-    (tmp_path / "SESSION.md").write_text(
+    (tmp_path / "memory" / "SESSION.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory" / "SESSION.md").write_text(
         "# SESSION\n\n## Context\n"
         "- key:memory.pending.response.verbosity | value:concise | kind:preference | priority:45 | ttl:session_end | source:user_inferred | updated_at:2026-02-07T00:00:00Z\n",
         encoding="utf-8",
@@ -106,6 +107,42 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     pending_items = r_pending.json()["items"]
     assert len(pending_items) == 1
     assert pending_items[0]["target_key"] == "response.verbosity"
+
+    r_metrics = client.get(f"/runs/{run_id}/memory/metrics")
+    assert r_metrics.status_code == 200
+    assert r_metrics.json()["pending_count"] == 1
+    assert isinstance(r_metrics.json()["policy_allow_tools"], list)
+
+    r_confirm = client.post(
+        f"/runs/{run_id}/memory/confirm",
+        json={"key": "response.verbosity", "reason": "approve via api"},
+    )
+    assert r_confirm.status_code == 200
+    assert r_confirm.json()["status"] == "confirmed"
+
+    r_pending_after_confirm = client.get(f"/runs/{run_id}/memory/pending")
+    assert r_pending_after_confirm.status_code == 200
+    assert r_pending_after_confirm.json()["items"] == []
+
+    (tmp_path / "memory" / "SESSION.md").write_text(
+        "# SESSION\n\n## Context\n"
+        "- key:memory.pending.response.tone | value:friendly | kind:preference | priority:45 | ttl:session_end | source:user_inferred | updated_at:2026-02-07T00:00:00Z\n",
+        encoding="utf-8",
+    )
+    r_reject = client.post(
+        f"/runs/{run_id}/memory/reject",
+        json={"key": "response.tone", "reason": "reject via api"},
+    )
+    assert r_reject.status_code == 200
+    assert r_reject.json()["status"] == "rejected"
+
+    r_reload_no_key = client.post("/admin/memory/policy/reload")
+    assert r_reload_no_key.status_code == 401
+
+    r_reload = client.post("/admin/memory/policy/reload", headers={"x-memory-admin-key": "admin-secret"})
+    assert r_reload.status_code == 200
+    assert r_reload.json()["status"] == "reloaded"
+    assert "policy_allow_tools" in r_reload.json()
 
     r_runs = client.get("/runs")
     assert r_runs.status_code == 200
@@ -131,6 +168,7 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     r_config = client.get("/system/config")
     assert r_config.status_code == 200
     assert r_config.json()["workspace"] == str(tmp_path)
+    assert r_config.json()["memory_admin_configured"] is True
 
     r_artifacts = client.get(f"/artifacts/{run_id}")
     assert r_artifacts.status_code == 200
@@ -185,6 +223,12 @@ def test_api_requires_key_when_configured(monkeypatch, tmp_path: Path) -> None:
 
     health = client.get("/health")
     assert health.status_code == 200
+
+    reload_policy = client.post(
+        "/admin/memory/policy/reload",
+        headers={"x-api-key": "secret-key", "x-memory-admin-key": "anything"},
+    )
+    assert reload_policy.status_code == 403
 
 
 def test_runs_are_sorted_by_latest_updated_at(monkeypatch, tmp_path: Path) -> None:

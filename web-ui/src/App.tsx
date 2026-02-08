@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bot, Download, LoaderCircle, PauseCircle, PlayCircle, SendHorizontal } from "lucide-react";
+import { Activity, Bot, Check, Download, LoaderCircle, PauseCircle, PlayCircle, SendHorizontal, X } from "lucide-react";
 
 import { MarkdownStream } from "@/components/ai-elements/markdown-stream";
 import { MessageBubble } from "@/components/ai-elements/message-bubble";
@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { apiClient, streamRun } from "@/lib/api-client";
 import { cn, formatTime } from "@/lib/utils";
-import type { ArtifactEntry, RunState, SkillItem } from "@/types/api";
+import type { ArtifactEntry, MemoryMetrics, PendingMemoryItem, RunState, SkillItem } from "@/types/api";
 
 type TimelineItem =
   | { id: string; kind: "event"; text: string }
@@ -69,11 +69,20 @@ export function App() {
   const [artifactQuery, setArtifactQuery] = useState("");
   const [artifactSort, setArtifactSort] = useState<"name" | "date" | "size">("date");
   const [showArtifacts, setShowArtifacts] = useState(true);
+  const [pendingMemoryItems, setPendingMemoryItems] = useState<PendingMemoryItem[]>([]);
+  const [memoryMetrics, setMemoryMetrics] = useState<MemoryMetrics | null>(null);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [memoryActionKey, setMemoryActionKey] = useState<string | null>(null);
+  const [policyReloadInfo, setPolicyReloadInfo] = useState<string>("");
+  const [policyReloadError, setPolicyReloadError] = useState<string | null>(null);
+  const [policyReloading, setPolicyReloading] = useState(false);
 
   const streamRef = useRef<EventSource | null>(null);
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
 
   const selectedRun = useMemo(() => runs.find((r) => r.run_id === selectedRunId) ?? null, [runs, selectedRunId]);
+  const canReloadPolicy = apiClient.hasMemoryAdminKey();
   const isSelectedRunRunning = selectedRun?.status === "running" || pending;
   const visibleArtifacts = useMemo(() => {
     const q = artifactQuery.trim().toLowerCase();
@@ -98,6 +107,7 @@ export function App() {
     if (!selectedRunId) return;
     streamRef.current?.close();
     void refreshArtifacts(selectedRunId);
+    void refreshMemoryPanel(selectedRunId);
 
     streamRef.current = streamRun(selectedRunId, {
       onState: (state) => {
@@ -112,7 +122,7 @@ export function App() {
       onEvent: (evt) => pushTimeline({ id: `e-${Date.now()}`, kind: "event", text: evt.message }),
       onDone: async () => {
         await refreshRunsOnly();
-        await refreshArtifacts(selectedRunId);
+        await Promise.all([refreshArtifacts(selectedRunId), refreshMemoryPanel(selectedRunId)]);
       },
       onError: () => void handleStreamError()
     });
@@ -185,6 +195,25 @@ export function App() {
     }
   }
 
+  async function refreshMemoryPanel(runId: string) {
+    try {
+      setMemoryLoading(true);
+      setMemoryError(null);
+      const [pendingRes, metrics] = await Promise.all([
+        apiClient.getPendingMemory(runId),
+        apiClient.getMemoryMetrics(runId)
+      ]);
+      setPendingMemoryItems(Array.isArray(pendingRes.items) ? pendingRes.items : []);
+      setMemoryMetrics(metrics);
+    } catch (e) {
+      setPendingMemoryItems([]);
+      setMemoryMetrics(null);
+      setMemoryError((e as Error).message);
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
   function pushTimeline(item: TimelineItem) {
     setTimeline((prev) => [...prev, item]);
   }
@@ -201,7 +230,11 @@ export function App() {
       });
       await refreshRunsOnly();
       setSelectedRunId(created.run_id);
-      await Promise.all([hydrateTimeline(created.run_id), refreshArtifacts(created.run_id)]);
+      await Promise.all([
+        hydrateTimeline(created.run_id),
+        refreshArtifacts(created.run_id),
+        refreshMemoryPanel(created.run_id)
+      ]);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -219,6 +252,44 @@ export function App() {
     if (!selectedRunId) return;
     await apiClient.resumeRun(selectedRunId);
     await refreshRunsOnly();
+  }
+
+  async function onConfirmPending(key: string) {
+    if (!selectedRunId) return;
+    try {
+      setMemoryActionKey(key);
+      await apiClient.confirmPendingMemory(selectedRunId, key, "confirmed from web ui");
+      await refreshMemoryPanel(selectedRunId);
+    } finally {
+      setMemoryActionKey(null);
+    }
+  }
+
+  async function onRejectPending(key: string) {
+    if (!selectedRunId) return;
+    try {
+      setMemoryActionKey(key);
+      await apiClient.rejectPendingMemory(selectedRunId, key, "rejected from web ui");
+      await refreshMemoryPanel(selectedRunId);
+    } finally {
+      setMemoryActionKey(null);
+    }
+  }
+
+  async function onReloadPolicy() {
+    try {
+      setPolicyReloading(true);
+      setPolicyReloadError(null);
+      const res = await apiClient.reloadMemoryPolicy();
+      const tools = Array.isArray(res.policy_allow_tools) && res.policy_allow_tools.length > 0
+        ? res.policy_allow_tools.join(", ")
+        : "(none)";
+      setPolicyReloadInfo(`entries=${res.policy_entry_count}, tools=${tools}`);
+    } catch (e) {
+      setPolicyReloadError((e as Error).message);
+    } finally {
+      setPolicyReloading(false);
+    }
   }
 
   function onDownloadArtifact(path: string) {
@@ -293,7 +364,11 @@ export function App() {
                     )}
                     onClick={async () => {
                       setSelectedRunId(run.run_id);
-                      await Promise.all([hydrateTimeline(run.run_id), refreshArtifacts(run.run_id)]);
+                      await Promise.all([
+                        hydrateTimeline(run.run_id),
+                        refreshArtifacts(run.run_id),
+                        refreshMemoryPanel(run.run_id)
+                      ]);
                     }}
                   >
                     <div className="mb-1 font-semibold">{run.run_id}</div>
@@ -324,6 +399,56 @@ export function App() {
             </div>
 
             <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Pending Memory</div>
+              {memoryError ? <div className="mb-2 text-xs text-red-600">{memoryError}</div> : null}
+              {memoryLoading ? <div className="mb-2 text-xs text-muted-foreground">Loading memory...</div> : null}
+              {memoryMetrics ? (
+                <div className="mb-2 rounded-md bg-secondary px-2 py-2 text-[11px] text-muted-foreground">
+                  <div>pending: {memoryMetrics.pending_count}</div>
+                  <div>compact failures: {memoryMetrics.compact_failures}</div>
+                  {memoryMetrics.pending_backlog_alert ? (
+                    <div className="text-red-600">
+                      backlog alert ({memoryMetrics.pending_count}/{memoryMetrics.pending_alert_threshold})
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="space-y-1 text-xs">
+                {pendingMemoryItems.length === 0 && !memoryLoading ? (
+                  <div className="rounded-md bg-secondary px-2 py-2 text-muted-foreground">No pending memory</div>
+                ) : null}
+                {pendingMemoryItems.map((item) => (
+                  <div key={item.pending_key} className="rounded-md border border-border bg-secondary/60 p-2">
+                    <div className="line-clamp-1 font-medium">{item.target_key}</div>
+                    <div className="line-clamp-2 text-[11px] text-muted-foreground">{item.value}</div>
+                    <div className="mt-1 flex items-center gap-1">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => onConfirmPending(item.target_key)}
+                        disabled={memoryActionKey === item.target_key}
+                      >
+                        {memoryActionKey === item.target_key ? (
+                          <LoaderCircle className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Check className="h-3 w-3" />
+                        )}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onRejectPending(item.target_key)}
+                        disabled={memoryActionKey === item.target_key}
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
               <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 <Activity className="h-3 w-3" /> Providers
               </div>
@@ -339,6 +464,24 @@ export function App() {
                 })}
               </div>
             </div>
+
+            {canReloadPolicy ? (
+              <div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Admin Policy</div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={onReloadPolicy}
+                  disabled={policyReloading}
+                  className="w-full"
+                >
+                  {policyReloading ? <LoaderCircle className="mr-1 h-3 w-3 animate-spin" /> : null}
+                  Reload Policy
+                </Button>
+                {policyReloadInfo ? <div className="mt-2 text-[11px] text-muted-foreground">{policyReloadInfo}</div> : null}
+                {policyReloadError ? <div className="mt-2 text-[11px] text-red-600">{policyReloadError}</div> : null}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </aside>
