@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import tempfile
 import shlex
 import subprocess
@@ -18,12 +19,36 @@ class SafeActionExecutor:
         workspace: Path,
         safe_commands: list[str],
         command_timeout_sec: int = 30,
+        exec_runtime: str = "host",
+        exec_container_lifecycle: str = "per_action",
+        exec_container_image: str = "python:3.11-slim",
+        exec_container_network: str = "none",
+        exec_container_cpus: float = 1.0,
+        exec_container_memory: str = "512m",
+        exec_container_pids_limit: int = 256,
+        run_id: str = "",
         max_output_chars: int = 12000,
         web_fetch_tls_verify: bool = True,
     ) -> None:
         self.workspace = workspace.resolve()
         self.safe_commands = safe_commands
         self.command_timeout_sec = command_timeout_sec
+        runtime = (exec_runtime or "host").strip().lower()
+        if runtime not in {"host", "container"}:
+            runtime = "host"
+        self.exec_runtime = runtime
+        lifecycle = (exec_container_lifecycle or "per_action").strip().lower()
+        if lifecycle not in {"per_action", "per_run"}:
+            lifecycle = "per_action"
+        self.exec_container_lifecycle = lifecycle
+        self.exec_container_image = (exec_container_image or "python:3.11-slim").strip()
+        self.exec_container_network = (exec_container_network or "none").strip()
+        self.exec_container_cpus = max(0.1, float(exec_container_cpus))
+        self.exec_container_memory = (exec_container_memory or "512m").strip()
+        self.exec_container_pids_limit = max(32, int(exec_container_pids_limit))
+        self.run_id = (run_id or "").strip()
+        self._container_started = False
+        self._container_name = self._build_container_name(self.run_id)
         self.max_output_chars = max_output_chars
         self.web_fetch_tls_verify = bool(web_fetch_tls_verify)
 
@@ -105,6 +130,12 @@ class SafeActionExecutor:
         parts = shlex.split(command)
         if not parts:
             raise ValueError("Invalid command")
+        raw_args = params.get("args")
+        if raw_args is not None:
+            if not isinstance(raw_args, list):
+                raise ValueError("args must be a list")
+            parts.extend(str(x) for x in raw_args)
+        parts = self._normalize_python_command_alias(parts)
         base = parts[0]
         if base not in self.safe_commands:
             raise ValueError(f"Command is not allowlisted: {base}")
@@ -115,18 +146,55 @@ class SafeActionExecutor:
             parts = self._hydrate_rm_targets(parts, params)
             self._validate_rm_paths(parts)
 
-        proc = subprocess.run(
-            parts,
-            cwd=self.workspace,
-            text=True,
-            capture_output=True,
-            timeout=self.command_timeout_sec,
-            check=False,
-        )
-        output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+        proc = self._run_subprocess(parts)
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+
+        output_file, stdout_file, stderr_file, append_mode = self._parse_command_redirect_targets(params)
+        written_paths: list[str] = []
+        if output_file:
+            combined = stdout + (("\n" + stderr) if stderr else "")
+            self._write_command_output_file(output_file, combined, append_mode=append_mode)
+            written_paths.append(output_file)
+        else:
+            if stdout_file:
+                self._write_command_output_file(stdout_file, stdout, append_mode=append_mode)
+                written_paths.append(stdout_file)
+            if stderr_file:
+                self._write_command_output_file(stderr_file, stderr, append_mode=append_mode)
+                written_paths.append(stderr_file)
+
+        raw_output = stdout + ("\n" + stderr if stderr else "")
+        output = self._truncate_output(raw_output)
+        if written_paths:
+            lines = [f"redirected output: {p}" for p in written_paths]
+            suffix = "\n".join(lines)
+            output = f"{output.strip()}\n{suffix}".strip() if output.strip() else suffix
+
         if proc.returncode != 0:
             return ActionResult(name="run_safe_command", ok=False, output=output, error=f"exit_code={proc.returncode}")
         return ActionResult(name="run_safe_command", ok=True, output=output.strip())
+
+    def _parse_command_redirect_targets(self, params: dict[str, Any]) -> tuple[str, str, str, bool]:
+        output_file = str(params.get("redirect_output", "")).strip() or str(params.get("output_file", "")).strip()
+        stdout_file = str(params.get("stdout_path", "")).strip() or str(params.get("redirect_stdout", "")).strip()
+        stderr_file = str(params.get("stderr_path", "")).strip() or str(params.get("redirect_stderr", "")).strip()
+
+        if output_file and (stdout_file or stderr_file):
+            raise ValueError("Use either redirect_output/output_file OR stdout_path/stderr_path, not both")
+
+        append_raw = params.get("append")
+        append_mode = bool(append_raw) if append_raw is not None else str(params.get("mode", "")).strip() == "append"
+        return output_file, stdout_file, stderr_file, append_mode
+
+    def _write_command_output_file(self, rel_path: str, content: str, append_mode: bool) -> None:
+        target = self._resolve_workspace_path(rel_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if append_mode:
+            with target.open("a", encoding="utf-8") as f:
+                f.write(content)
+            return
+        target.write_text(content, encoding="utf-8")
 
     def _hydrate_rm_targets(self, parts: list[str], params: dict[str, Any]) -> list[str]:
         # Some plans produce "rm -f" and provide paths separately. Hydrate targets from params when needed.
@@ -155,12 +223,14 @@ class SafeActionExecutor:
 
     def _run_python_code(self, params: dict[str, Any]) -> ActionResult:
         code = str(params.get("code", "")).strip()
-        if not code:
+        rel_script_path = str(params.get("path", "")).strip()
+        if not code and not rel_script_path:
             raise ValueError("Missing code")
 
         python_bin = str(params.get("python_bin", "python")).strip()
         if not python_bin:
             raise ValueError("Missing python_bin")
+        python_bin = self._normalize_python_bin_alias(python_bin)
         if python_bin not in self.safe_commands:
             raise ValueError(f"Python binary is not allowlisted: {python_bin}")
 
@@ -171,7 +241,6 @@ class SafeActionExecutor:
             raise ValueError("args must be a list")
         args = [str(x) for x in args]
 
-        rel_script_path = str(params.get("path", "")).strip()
         if rel_script_path:
             script_path = self._resolve_workspace_path(rel_script_path)
             script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,21 +252,33 @@ class SafeActionExecutor:
             ) as tmp:
                 script_path = Path(tmp.name)
                 tmp.write(code)
-        if rel_script_path:
+        if rel_script_path and code:
             script_path.write_text(code, encoding="utf-8")
+        elif rel_script_path and not script_path.exists():
+            raise ValueError(f"Script file not found: {script_path}")
 
-        proc = subprocess.run(
-            [python_bin, str(script_path), *args],
-            cwd=self.workspace,
-            text=True,
-            capture_output=True,
-            timeout=self.command_timeout_sec,
-            check=False,
-        )
+        command_parts = [python_bin, str(script_path), *args]
+        proc = self._run_subprocess(command_parts)
         output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
         if proc.returncode != 0:
             return ActionResult(name="run_python_code", ok=False, output=output, error=f"exit_code={proc.returncode}")
         return ActionResult(name="run_python_code", ok=True, output=output.strip())
+
+    def _normalize_python_command_alias(self, parts: list[str]) -> list[str]:
+        if not parts:
+            return parts
+        base = self._normalize_python_bin_alias(parts[0])
+        if base == parts[0]:
+            return parts
+        return [base, *parts[1:]]
+
+    def _normalize_python_bin_alias(self, python_bin: str) -> str:
+        raw = (python_bin or "").strip()
+        if raw != "python3":
+            return raw
+        if "python" in self.safe_commands:
+            return "python"
+        return raw
 
     def _validate_rm_paths(self, parts: list[str]) -> None:
         if len(parts) < 2:
@@ -270,3 +351,114 @@ class SafeActionExecutor:
             return text
         clipped = text[: self.max_output_chars]
         return f"{clipped}\n\n[truncated to {self.max_output_chars} chars]"
+
+    def _run_subprocess(self, parts: list[str]) -> subprocess.CompletedProcess[str]:
+        if self.exec_runtime != "container":
+            return self._run_subprocess_raw(parts)
+        if self.exec_container_lifecycle == "per_run":
+            self._ensure_run_container_started()
+            return self._run_subprocess_raw(self._build_container_exec_command(parts))
+        return self._run_subprocess_raw(self._build_per_action_container_command(parts))
+
+    def _run_subprocess_raw(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command,
+            cwd=self.workspace,
+            text=True,
+            capture_output=True,
+            timeout=self.command_timeout_sec,
+            check=False,
+        )
+
+    def _build_per_action_container_command(self, parts: list[str]) -> list[str]:
+        mapped = [self._map_workspace_path_for_container(p) for p in parts]
+        return [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            self.exec_container_network,
+            "--cpus",
+            f"{self.exec_container_cpus:g}",
+            "--memory",
+            self.exec_container_memory,
+            "--pids-limit",
+            str(self.exec_container_pids_limit),
+            "-v",
+            f"{self.workspace}:/workspace",
+            "-w",
+            "/workspace",
+            self.exec_container_image,
+            *mapped,
+        ]
+
+    def _build_container_bootstrap_command(self) -> list[str]:
+        return [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            self._container_name,
+            "--network",
+            self.exec_container_network,
+            "--cpus",
+            f"{self.exec_container_cpus:g}",
+            "--memory",
+            self.exec_container_memory,
+            "--pids-limit",
+            str(self.exec_container_pids_limit),
+            "-v",
+            f"{self.workspace}:/workspace",
+            "-w",
+            "/workspace",
+            self.exec_container_image,
+            "sh",
+            "-lc",
+            "while true; do sleep 3600; done",
+        ]
+
+    def _build_container_exec_command(self, parts: list[str]) -> list[str]:
+        mapped = [self._map_workspace_path_for_container(p) for p in parts]
+        return ["docker", "exec", self._container_name, *mapped]
+
+    def _map_workspace_path_for_container(self, token: str) -> str:
+        text = str(token)
+        try:
+            resolved = Path(text).resolve()
+        except Exception:
+            return text
+        if not str(resolved).startswith(str(self.workspace)):
+            return text
+        rel = resolved.relative_to(self.workspace)
+        return str(Path("/workspace") / rel)
+
+    def _ensure_run_container_started(self) -> None:
+        if self._container_started:
+            return
+        bootstrap = self._build_container_bootstrap_command()
+        proc = self._run_subprocess_raw(bootstrap)
+        if proc.returncode != 0:
+            output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+            raise RuntimeError(f"failed to start run container: {output}")
+        self._container_started = True
+
+    def shutdown(self) -> None:
+        if not self._container_started:
+            return
+        subprocess.run(
+            ["docker", "rm", "-f", self._container_name],
+            cwd=self.workspace,
+            text=True,
+            capture_output=True,
+            timeout=min(self.command_timeout_sec, 10),
+            check=False,
+        )
+        self._container_started = False
+
+    def _build_container_name(self, run_id: str) -> str:
+        rid = (run_id or "").strip() or "runtime"
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", rid).strip("-")
+        if not safe:
+            safe = "runtime"
+        return f"softnix-run-{safe}"

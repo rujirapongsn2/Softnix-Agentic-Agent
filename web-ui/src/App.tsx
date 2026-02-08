@@ -16,7 +16,7 @@ import { cn, formatTime } from "@/lib/utils";
 import type { ArtifactEntry, MemoryMetrics, PendingMemoryItem, RunState, SkillItem } from "@/types/api";
 
 type TimelineItem =
-  | { id: string; kind: "event"; text: string }
+  | { id: string; kind: "event"; text: string; at?: string }
   | { id: string; kind: "iteration"; item: Record<string, unknown> }
   | { id: string; kind: "state"; state: RunState };
 
@@ -48,6 +48,104 @@ function formatBytes(size: number): string {
   if (kb < 1024) return `${kb.toFixed(1)} KB`;
   const mb = kb / 1024;
   return `${mb.toFixed(1)} MB`;
+}
+
+function parseEventLine(line: string): { at?: string; message: string } {
+  const m = line.match(/^(\d{4}-\d{2}-\d{2}T[^\s]+)\s+(.*)$/);
+  if (!m) return { message: line };
+  return { at: m[1], message: m[2] };
+}
+
+function prettifyEventMessage(message: string): string {
+  const init = message.match(/^run initialized task=(.+)$/);
+  if (init) return "Run started";
+
+  const skill = message.match(/^skills selected iteration=(\d+) names=(.+)$/);
+  if (skill) return `Iteration ${skill[1]}: selected skills ${skill[2]}`;
+
+  const artifact = message.match(/^artifact saved: (.+)$/);
+  if (artifact) return `Artifact saved: ${artifact[1]}`;
+
+  const iter = message.match(/^iteration=(\d+) done=(True|False)$/);
+  if (iter) return `Iteration ${iter[1]} finished (${iter[2] === "True" ? "done" : "continue"})`;
+
+  const validationFailed = message.match(/^objective validation failed count=(\d+)$/);
+  if (validationFailed) {
+    return `Validation failed (${validationFailed[1]} checks). Run is not complete yet.`;
+  }
+
+  if (message === "objective validation passed") return "Validation passed";
+  if (message === "stopped: max_iters reached") return "Run failed: reached max iterations before objective completed";
+  if (message === "stopped by cancel request") return "Run canceled by user request";
+
+  const metrics = message.match(/^memory metrics pending_count=(\d+)$/);
+  if (metrics) return `Memory pending count: ${metrics[1]}`;
+
+  return message;
+}
+
+function renderStopReason(stopReason?: string | null): string {
+  if (!stopReason) return "unknown";
+  if (stopReason === "completed") return "objective completed";
+  if (stopReason === "max_iters") return "max iterations reached";
+  if (stopReason === "canceled") return "canceled";
+  if (stopReason === "error") return "runtime error";
+  if (stopReason === "interrupted") return "interrupted";
+  return stopReason;
+}
+
+function runOutcome(run: RunState): { label: string; variant: "default" | "muted" | "danger" } {
+  if (run.status === "running") return { label: "running", variant: "muted" };
+  if (run.status === "canceled") return { label: "canceled", variant: "muted" };
+  if (run.status === "failed" || run.stop_reason === "max_iters" || run.stop_reason === "error") {
+    return { label: "failed", variant: "danger" };
+  }
+  if (run.status === "completed" && run.stop_reason === "completed") {
+    return { label: "success", variant: "default" };
+  }
+  return { label: run.status, variant: "muted" };
+}
+
+function finalSummary(run: RunState | null): { title: string; detail: string; tone: "ok" | "warn" | "neutral" } | null {
+  if (!run || run.status === "running") return null;
+
+  if (run.status === "completed" && run.stop_reason === "completed") {
+    return {
+      title: "Final Result: Success",
+      detail: `Objective completed in ${run.iteration} iteration(s).`,
+      tone: "ok"
+    };
+  }
+
+  if (run.status === "failed" && run.stop_reason === "max_iters") {
+    return {
+      title: "Final Result: Failed",
+      detail: `Reached max iterations (${run.max_iters}) before completing objective.`,
+      tone: "warn"
+    };
+  }
+
+  if (run.status === "failed" && run.stop_reason === "error") {
+    return {
+      title: "Final Result: Failed",
+      detail: "Execution stopped due to runtime error.",
+      tone: "warn"
+    };
+  }
+
+  if (run.status === "canceled") {
+    return {
+      title: "Final Result: Canceled",
+      detail: "Run was canceled before objective completion.",
+      tone: "neutral"
+    };
+  }
+
+  return {
+    title: "Final Result",
+    detail: `status=${run.status}, stop_reason=${renderStopReason(run.stop_reason)}`,
+    tone: "neutral"
+  };
 }
 
 export function App() {
@@ -82,6 +180,7 @@ export function App() {
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
 
   const selectedRun = useMemo(() => runs.find((r) => r.run_id === selectedRunId) ?? null, [runs, selectedRunId]);
+  const selectedRunSummary = useMemo(() => finalSummary(selectedRun), [selectedRun]);
   const canReloadPolicy = apiClient.hasMemoryAdminKey();
   const isSelectedRunRunning = selectedRun?.status === "running" || pending;
   const visibleArtifacts = useMemo(() => {
@@ -119,7 +218,15 @@ export function App() {
         pushTimeline({ id: `s-${Date.now()}`, kind: "state", state });
       },
       onIteration: (item) => pushTimeline({ id: `i-${Date.now()}`, kind: "iteration", item }),
-      onEvent: (evt) => pushTimeline({ id: `e-${Date.now()}`, kind: "event", text: evt.message }),
+      onEvent: (evt) => {
+        const parsed = parseEventLine(evt.message);
+        pushTimeline({
+          id: `e-${Date.now()}`,
+          kind: "event",
+          text: prettifyEventMessage(parsed.message),
+          at: parsed.at
+        });
+      },
       onDone: async () => {
         await refreshRunsOnly();
         await Promise.all([refreshArtifacts(selectedRunId), refreshMemoryPanel(selectedRunId)]);
@@ -170,11 +277,30 @@ export function App() {
 
   async function hydrateTimeline(runId: string) {
     const [events, iterations] = await Promise.all([apiClient.getRunEvents(runId), apiClient.getRunIterations(runId)]);
-
-    const merged: TimelineItem[] = [
-      ...events.items.map((text, idx) => ({ id: `event-${idx}`, kind: "event" as const, text })),
-      ...iterations.items.map((item, idx) => ({ id: `iter-${idx}`, kind: "iteration" as const, item }))
-    ];
+    const eventItems = events.items.map((text, idx) => {
+      const parsed = parseEventLine(text);
+      const ts = parsed.at ? Date.parse(parsed.at) : Number.NaN;
+      return {
+        id: `event-${idx}`,
+        kind: "event" as const,
+        text: prettifyEventMessage(parsed.message),
+        at: parsed.at,
+        ts: Number.isFinite(ts) ? ts : idx
+      };
+    });
+    const iterationItems = iterations.items.map((item, idx) => {
+      const rawTs = typeof item.timestamp === "string" ? item.timestamp : "";
+      const ts = rawTs ? Date.parse(rawTs) : Number.NaN;
+      return {
+        id: `iter-${idx}`,
+        kind: "iteration" as const,
+        item,
+        ts: Number.isFinite(ts) ? ts : idx + 1_000_000
+      };
+    });
+    const merged = [...eventItems, ...iterationItems]
+      .sort((a, b) => a.ts - b.ts)
+      .map(({ ts: _ts, ...rest }) => rest as TimelineItem);
     setTimeline(merged);
   }
 
@@ -355,7 +481,9 @@ export function App() {
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Runs</div>
               <ScrollArea className="h-56 space-y-2 pr-1">
-                {runs.map((run) => (
+                {runs.map((run) => {
+                  const outcome = runOutcome(run);
+                  return (
                   <button
                     key={run.run_id}
                     className={cn(
@@ -379,11 +507,12 @@ export function App() {
                       </div>
                     ) : null}
                     <div className="mt-2 flex items-center justify-between">
-                      <Badge variant={run.status === "failed" ? "danger" : "muted"}>{run.status}</Badge>
+                      <Badge variant={outcome.variant}>{outcome.label}</Badge>
                       <span className="text-[10px] text-muted-foreground">iter {run.iteration}</span>
                     </div>
                   </button>
-                ))}
+                  );
+                })}
               </ScrollArea>
             </div>
 
@@ -492,8 +621,13 @@ export function App() {
             <div>
               <CardTitle className="text-lg">Conversation Timeline</CardTitle>
                   <div className="text-xs text-muted-foreground">
-                    {selectedRun ? `${selectedRun.run_id} · ${selectedRun.status} · updated ${formatTime(selectedRun.updated_at)}` : "No run selected"}
+                    {selectedRun ? `${selectedRun.run_id} · ${runOutcome(selectedRun).label} · updated ${formatTime(selectedRun.updated_at)}` : "No run selected"}
                   </div>
+                  {selectedRun ? (
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      stop reason: {renderStopReason(selectedRun.stop_reason)}
+                    </div>
+                  ) : null}
                   {selectedRun && Array.isArray(selectedRun.selected_skills) && selectedRun.selected_skills.length > 0 ? (
                     <div className="mt-1 text-[11px] text-primary">skills: {selectedRun.selected_skills.join(", ")}</div>
                   ) : null}
@@ -521,24 +655,42 @@ export function App() {
             </div>
           </CardHeader>
           <CardContent>
+            {selectedRunSummary ? (
+              <div
+                className={cn(
+                  "mb-3 rounded-lg border px-3 py-2 text-sm",
+                  selectedRunSummary.tone === "ok" && "border-green-200 bg-green-50 text-green-800",
+                  selectedRunSummary.tone === "warn" && "border-red-200 bg-red-50 text-red-800",
+                  selectedRunSummary.tone === "neutral" && "border-border bg-secondary/60 text-foreground"
+                )}
+              >
+                <div className="font-semibold">{selectedRunSummary.title}</div>
+                <div className="text-xs">{selectedRunSummary.detail}</div>
+              </div>
+            ) : null}
             <ScrollArea ref={timelineViewportRef} className="h-[76vh] space-y-3 pr-2">
               <AnimatePresence>
                 {timeline.map((item) => (
                   <motion.div key={item.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mb-3">
                     {item.kind === "event" ? (
-                      <MessageBubble role="system" timestamp={new Date().toLocaleTimeString()}>
+                      <MessageBubble role="system" timestamp={formatTime(item.at)}>
                         {item.text}
                       </MessageBubble>
                     ) : null}
 
                     {item.kind === "state" ? (
                       <MessageBubble role="assistant" timestamp={formatTime(item.state.updated_at)}>
-                        <ThinkingBlock text={`status=${item.state.status}, iteration=${item.state.iteration}`} />
+                        <ThinkingBlock
+                          text={`state: ${runOutcome(item.state).label}, iteration=${item.state.iteration}, stop_reason=${renderStopReason(item.state.stop_reason)}`}
+                        />
                       </MessageBubble>
                     ) : null}
 
                     {item.kind === "iteration" ? (
-                      <MessageBubble role="assistant" timestamp={new Date().toLocaleTimeString()}>
+                      <MessageBubble
+                        role="assistant"
+                        timestamp={formatTime(typeof item.item.timestamp === "string" ? item.item.timestamp : undefined)}
+                      >
                         <div className="space-y-3">
                           <MarkdownStream content={String(item.item.output ?? "")} />
                           {Array.isArray(item.item.action_results)

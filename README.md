@@ -85,6 +85,13 @@ pip install -e '.[dev]'
 - `SOFTNIX_CORS_ORIGINS` กำหนด origin ที่อนุญาต (comma-separated)
 - `SOFTNIX_CORS_ALLOW_CREDENTIALS` (`true`/`false`)
 - `SOFTNIX_EXEC_TIMEOUT_SEC` timeout ต่อ action ที่รันคำสั่ง/โค้ด
+- `SOFTNIX_EXEC_RUNTIME` โหมด execution runtime (`host` หรือ `container`)
+- `SOFTNIX_EXEC_CONTAINER_LIFECYCLE` lifecycle ของ container (`per_action` หรือ `per_run`)
+- `SOFTNIX_EXEC_CONTAINER_IMAGE` container image ที่ใช้เมื่อ runtime=container
+- `SOFTNIX_EXEC_CONTAINER_NETWORK` network mode ของ container runtime (แนะนำ `none`)
+- `SOFTNIX_EXEC_CONTAINER_CPUS` จำกัด CPU สำหรับ container runtime
+- `SOFTNIX_EXEC_CONTAINER_MEMORY` จำกัด memory สำหรับ container runtime
+- `SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT` จำกัดจำนวน process ภายใน container
 - `SOFTNIX_MAX_ACTION_OUTPUT_CHARS` จำกัดขนาด output ต่อ action
 - `SOFTNIX_WEB_FETCH_TLS_VERIFY` เปิด/ปิด TLS certificate verification สำหรับ `web_fetch` (default `true`)
 - `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `memory/PROFILE.md`)
@@ -236,8 +243,54 @@ Action ที่รองรับในรุ่นแรก:
 ข้อจำกัด:
 - ห้าม path ออกนอก workspace
 - shell command ต้องอยู่ใน allowlist (`SOFTNIX_SAFE_COMMANDS`)
+- รองรับ alias `python3 -> python` อัตโนมัติสำหรับ `run_safe_command` และ `run_python_code` (เมื่อ `python` อยู่ใน allowlist)
+- `run_safe_command` รองรับพารามิเตอร์แบบ structured:
+  - `command` (จำเป็น): executable/command
+  - `args` (optional): list ของ argument เช่น `["install_and_check.py"]`
+  - `stdout_path` / `stderr_path` (optional): บันทึก stdout/stderr ลงไฟล์ใน workspace โดยไม่ต้องใช้ shell redirection
+  - backward compatible กับ `redirect_output` / `output_file` (legacy)
 - token เสี่ยง (`sudo`, `curl`, `wget`, `ssh`, `scp`, `mv`) ถูก block
 - `rm` อนุญาตเมื่ออยู่ใน allowlist และลบได้เฉพาะ path ภายใน workspace
+- เมื่อ `SOFTNIX_EXEC_RUNTIME=container` ระบบจะรัน `run_safe_command`/`run_python_code` ผ่าน `docker run` พร้อม resource/network limits
+
+### Container Runtime (P0)
+
+ตัวอย่างเปิดโหมด container sandbox:
+
+```bash
+SOFTNIX_EXEC_RUNTIME=container
+SOFTNIX_EXEC_CONTAINER_LIFECYCLE=per_run
+SOFTNIX_EXEC_CONTAINER_IMAGE=python:3.11-slim
+SOFTNIX_EXEC_CONTAINER_NETWORK=none
+SOFTNIX_EXEC_CONTAINER_CPUS=1.0
+SOFTNIX_EXEC_CONTAINER_MEMORY=512m
+SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=256
+```
+
+หมายเหตุ:
+- เครื่องที่รัน backend ต้องมี Docker
+- โหมด `per_run` จะสร้าง container หนึ่งตัวต่อ run แล้วใช้ `docker exec` สำหรับ action ถัดไป เพื่อลด overhead และคง dependency ระหว่าง action ใน run เดียวกัน
+- action `web_fetch` ยังเป็น HTTP client ของ backend process (ไม่รันใน container runtime)
+
+ความหมายของ `SOFTNIX_EXEC_CONTAINER_LIFECYCLE`:
+- `per_action`
+  - สร้าง container ใหม่ทุก action (`docker run --rm` ต่อครั้ง)
+  - ปลอดภัยและแยก execution ดีที่สุดในเชิง action-level
+  - overhead สูงกว่า และ dependency ที่ติดตั้งใน action ก่อนหน้าจะไม่คงอยู่
+  - เหมาะกับงานสั้น/ง่าย หรือเน้น isolation สูง
+- `per_run`
+  - สร้าง container 1 ตัวต่อ run แล้ว reuse ด้วย `docker exec`
+  - overhead ต่ำกว่า และ state/dependency ภายใน container คงอยู่ตลอด run เดียวกัน
+  - พฤติกรรมใกล้ host มากกว่า เหมาะกับ autonomous task ที่วนเขียน/รัน/แก้หลายรอบ
+  - เมื่อ run จบ ระบบจะ cleanup container อัตโนมัติ
+
+### Objective Validation (P0)
+
+- เมื่อ planner ตอบ `done=true` ระบบจะรัน objective validation ก่อนสรุปผลทุกครั้ง
+- รองรับ validation จากแผน (`plan.validations`) เช่น:
+  - `{"type":"file_exists","path":"result.txt"}`
+  - `{"type":"text_in_file","path":"result.txt","contains":"success"}`
+- หาก validation ไม่ผ่าน ระบบจะบังคับ `done=false` และใส่เหตุผลลง output/events เพื่อให้ agent iterate ต่อ
 
 ## Core Memory (Markdown-first)
 

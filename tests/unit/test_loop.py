@@ -6,7 +6,7 @@ from softnix_agentic_agent.agent.planner import Planner
 from softnix_agentic_agent.config import Settings
 from softnix_agentic_agent.providers.base import LLMProvider
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
-from softnix_agentic_agent.types import LLMResponse, ProviderStatus, StopReason
+from softnix_agentic_agent.types import LLMResponse, ProviderStatus, RunStatus, StopReason
 
 
 class FakeProvider(LLMProvider):
@@ -68,6 +68,7 @@ def test_loop_max_iters(tmp_path: Path) -> None:
     )
 
     assert state.stop_reason == StopReason.MAX_ITERS
+    assert state.status == RunStatus.FAILED
     assert state.iteration == 2
 
 
@@ -216,6 +217,69 @@ def test_loop_autofills_rm_targets_from_task_when_missing(tmp_path: Path) -> Non
     assert result.exists() is False
 
 
+def test_loop_objective_validation_blocks_done_when_output_missing(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "final_output": "saved result.txt",
+                "actions": [],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียนผลลัพธ์ลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "[validation] failed" in state.last_output
+    assert "missing output file: result.txt" in state.last_output
+
+
+def test_loop_objective_validation_accepts_valid_file_exists_check(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "result.txt", "content": "ok"},
+                    }
+                ],
+                "validations": [{"type": "file_exists", "path": "result.txt"}],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="create result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert (tmp_path / "result.txt").exists() is True
+
+
 def test_loop_logs_selected_skills_in_events(tmp_path: Path) -> None:
     skill_dir = tmp_path / "web-summary"
     skill_dir.mkdir(parents=True)
@@ -248,3 +312,88 @@ Use this skill when task contains URL and asks summary.
     assert state.stop_reason == StopReason.COMPLETED
     events = store.read_events(state.run_id)
     assert any("skills selected iteration=1 names=web-summary" in e for e in events)
+
+
+def test_loop_normalizes_python3_alias_for_run_python_code(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {
+                            "python_bin": "python3",
+                            "code": "from pathlib import Path\nPath('out.txt').write_text('ok', encoding='utf-8')\n",
+                        },
+                    }
+                ],
+                "validations": [{"type": "file_exists", "path": "out.txt"}],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        safe_commands=["python", "ls", "rm"],
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียนผลลัพธ์ลง out.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert (tmp_path / "out.txt").exists() is True
+
+
+def test_loop_run_shell_command_with_structured_args_can_write_result_file(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "run_shell_command",
+                        "params": {
+                            "command": "python",
+                            "args": ["-c", "print('humanize version 4.15.0')"],
+                            "stdout_path": "result.txt",
+                        },
+                    }
+                ],
+                "validations": [{"type": "text_in_file", "path": "result.txt", "contains": "humanize version"}],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        safe_commands=["python", "ls", "rm"],
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="run shell command and save output to result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert (tmp_path / "result.txt").exists() is True
+    assert "result.txt" in store.list_artifacts(state.run_id)

@@ -94,6 +94,14 @@ class AgentLoopRunner:
             workspace=Path(state.workspace),
             safe_commands=self.settings.safe_commands,
             command_timeout_sec=self.settings.exec_timeout_sec,
+            exec_runtime=self.settings.exec_runtime,
+            exec_container_lifecycle=self.settings.exec_container_lifecycle,
+            exec_container_image=self.settings.exec_container_image,
+            exec_container_network=self.settings.exec_container_network,
+            exec_container_cpus=self.settings.exec_container_cpus,
+            exec_container_memory=self.settings.exec_container_memory,
+            exec_container_pids_limit=self.settings.exec_container_pids_limit,
+            run_id=state.run_id,
             max_output_chars=self.settings.max_action_output_chars,
             web_fetch_tls_verify=self.settings.web_fetch_tls_verify,
         )
@@ -221,6 +229,29 @@ class AgentLoopRunner:
                         ]
                     )
 
+                if done:
+                    validation_report = self._evaluate_objective_validations(
+                        task=state.task,
+                        plan=plan,
+                        workspace=Path(state.workspace),
+                    )
+                    plan["validation"] = validation_report
+                    if not validation_report["ok"]:
+                        done = False
+                        failures = validation_report["failures"]
+                        failure_text = "\n".join(f"- {item}" for item in failures)
+                        output = (
+                            (output + "\n\n" if output else "")
+                            + "[validation] failed; continue iterations\n"
+                            + failure_text
+                        )
+                        self.store.log_event(
+                            state.run_id,
+                            f"objective validation failed count={len(failures)}",
+                        )
+                    else:
+                        self.store.log_event(state.run_id, "objective validation passed")
+
                 record = IterationRecord(
                     run_id=state.run_id,
                     iteration=current_iteration,
@@ -248,7 +279,7 @@ class AgentLoopRunner:
 
                 self.store.write_state(state)
 
-            state.status = RunStatus.COMPLETED
+            state.status = RunStatus.FAILED
             state.stop_reason = StopReason.MAX_ITERS
             state.updated_at = utc_now_iso()
             self.store.write_state(state)
@@ -269,6 +300,8 @@ class AgentLoopRunner:
             self.store.write_state(state)
             self.store.log_event(state.run_id, f"error: {exc}")
             return state
+        finally:
+            executor.shutdown()
 
     def _snapshot_artifacts(self, state: RunState, actions: list[dict[str, Any]], action_results: list[dict[str, Any]]) -> None:
         workspace = Path(state.workspace)
@@ -303,34 +336,55 @@ class AgentLoopRunner:
     def _prepare_action(self, action: dict[str, Any], task: str, workspace: Path) -> dict[str, Any]:
         prepared = copy.deepcopy(action)
         name = str(prepared.get("name", ""))
-        if name not in {"run_safe_command", "run_shell_command"}:
-            return prepared
-
         params = prepared.get("params")
         if not isinstance(params, dict):
             return prepared
 
-        command = str(params.get("command", "")).strip()
-        if not command:
+        if name in {"run_safe_command", "run_shell_command"}:
+            command = str(params.get("command", "")).strip()
+            if not command:
+                return prepared
+
+            command = self._normalize_shell_python_alias(command)
+            params["command"] = command
+
+            try:
+                parts = shlex.split(command)
+            except Exception:
+                return prepared
+            if not parts or parts[0] != "rm":
+                return prepared
+
+            if self._has_rm_targets(parts):
+                return prepared
+
+            targets = self._extract_file_targets_from_task(task, workspace)
+            if not targets:
+                return prepared
+
+            params["paths"] = targets
+            params["command"] = f"{command} " + " ".join(shlex.quote(t) for t in targets)
             return prepared
 
+        if name == "run_python_code":
+            python_bin = str(params.get("python_bin", "")).strip()
+            if python_bin == "python3":
+                params["python_bin"] = "python"
+            return prepared
+
+        return prepared
+
+    def _normalize_shell_python_alias(self, command: str) -> str:
         try:
             parts = shlex.split(command)
         except Exception:
-            return prepared
-        if not parts or parts[0] != "rm":
-            return prepared
-
-        if self._has_rm_targets(parts):
-            return prepared
-
-        targets = self._extract_file_targets_from_task(task, workspace)
-        if not targets:
-            return prepared
-
-        params["paths"] = targets
-        params["command"] = f"{command} " + " ".join(shlex.quote(t) for t in targets)
-        return prepared
+            return command
+        if not parts:
+            return command
+        if parts[0] != "python3":
+            return command
+        parts[0] = "python"
+        return shlex.join(parts)
 
     def _has_rm_targets(self, parts: list[str]) -> bool:
         treat_as_target = False
@@ -398,3 +452,115 @@ class AgentLoopRunner:
             "run_shell_command": "run_safe_command",
         }
         return aliases.get(raw, raw)
+
+    def _evaluate_objective_validations(
+        self,
+        task: str,
+        plan: dict[str, Any],
+        workspace: Path,
+    ) -> dict[str, Any]:
+        checks = self._collect_validation_checks(task=task, plan=plan)
+        if not checks:
+            return {"ok": True, "failures": [], "checks": []}
+
+        failures: list[str] = []
+        root = workspace.resolve()
+        for check in checks:
+            ctype = str(check.get("type", "")).strip().lower()
+            path_text = str(check.get("path", "")).strip()
+            if not path_text:
+                failures.append("validation missing path")
+                continue
+            target = (root / path_text).resolve()
+            if not str(target).startswith(str(root)):
+                failures.append(f"path escapes workspace: {path_text}")
+                continue
+            if ctype == "file_exists":
+                if not target.exists() or not target.is_file():
+                    failures.append(f"missing output file: {path_text}")
+                continue
+            if ctype == "text_in_file":
+                if not target.exists() or not target.is_file():
+                    failures.append(f"missing output file: {path_text}")
+                    continue
+                content = target.read_text(encoding="utf-8")
+                needle = str(check.get("contains", ""))
+                if needle and needle not in content:
+                    failures.append(f"text not found in {path_text}: {needle}")
+                continue
+            failures.append(f"unknown validation type: {ctype}")
+
+        return {"ok": len(failures) == 0, "failures": failures, "checks": checks}
+
+    def _collect_validation_checks(self, task: str, plan: dict[str, Any]) -> list[dict[str, str]]:
+        checks: list[dict[str, str]] = []
+        raw_validations = plan.get("validations")
+        if isinstance(raw_validations, list):
+            for item in raw_validations:
+                if not isinstance(item, dict):
+                    continue
+                ctype = str(item.get("type", "")).strip().lower()
+                path = str(item.get("path", "")).strip()
+                contains = str(item.get("contains", ""))
+                if ctype in {"file_exists", "text_in_file"} and path:
+                    payload = {"type": ctype, "path": path}
+                    if ctype == "text_in_file":
+                        payload["contains"] = contains
+                    checks.append(payload)
+
+        inferred_files = self._infer_output_files_from_task(task)
+        for path in inferred_files:
+            checks.append({"type": "file_exists", "path": path})
+
+        # preserve order with dedup
+        seen = set()
+        uniq: list[dict[str, str]] = []
+        for item in checks:
+            sig = (item.get("type", ""), item.get("path", ""), item.get("contains", ""))
+            if sig in seen:
+                continue
+            seen.add(sig)
+            uniq.append(item)
+        return uniq
+
+    def _infer_output_files_from_task(self, task: str) -> list[str]:
+        text = (task or "").strip()
+        if not text:
+            return []
+        intent_keywords = (
+            "write",
+            "create",
+            "generate",
+            "save",
+            "output",
+            "บันทึก",
+            "สร้าง",
+            "เขียนผลลัพธ์",
+            "เขียนลง",
+        )
+        lowered = text.lower()
+        if not any(k in lowered for k in intent_keywords):
+            return []
+
+        candidates = re.findall(r"([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)", text)
+        files: list[str] = []
+        for token in candidates:
+            if "://" in token or token.startswith("www."):
+                continue
+            if token.count(".") > 1 and "/" not in token:
+                # likely domain name, not workspace file
+                continue
+            if token.startswith("./"):
+                token = token[2:]
+            if token.startswith("/"):
+                continue
+            files.append(token)
+
+        seen = set()
+        uniq: list[str] = []
+        for f in files:
+            if f in seen:
+                continue
+            seen.add(f)
+            uniq.append(f)
+        return uniq

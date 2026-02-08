@@ -25,6 +25,13 @@ class Settings:
     cors_origins: list[str] = None  # type: ignore[assignment]
     cors_allow_credentials: bool = True
     exec_timeout_sec: int = 30
+    exec_runtime: str = "host"
+    exec_container_lifecycle: str = "per_action"
+    exec_container_image: str = "python:3.11-slim"
+    exec_container_network: str = "none"
+    exec_container_cpus: float = 1.0
+    exec_container_memory: str = "512m"
+    exec_container_pids_limit: int = 256
     max_action_output_chars: int = 12000
     web_fetch_tls_verify: bool = True
     memory_profile_file: str = "memory/PROFILE.md"
@@ -76,6 +83,13 @@ def load_settings() -> Settings:
         cors_origins=cors_origins,
         cors_allow_credentials=cors_allow_credentials,
         exec_timeout_sec=int(os.getenv("SOFTNIX_EXEC_TIMEOUT_SEC", "30")),
+        exec_runtime=os.getenv("SOFTNIX_EXEC_RUNTIME", "host"),
+        exec_container_lifecycle=os.getenv("SOFTNIX_EXEC_CONTAINER_LIFECYCLE", "per_action"),
+        exec_container_image=os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        exec_container_network=os.getenv("SOFTNIX_EXEC_CONTAINER_NETWORK", "none"),
+        exec_container_cpus=float(os.getenv("SOFTNIX_EXEC_CONTAINER_CPUS", "1.0")),
+        exec_container_memory=os.getenv("SOFTNIX_EXEC_CONTAINER_MEMORY", "512m"),
+        exec_container_pids_limit=int(os.getenv("SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT", "256")),
         max_action_output_chars=int(os.getenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", "12000")),
         web_fetch_tls_verify=os.getenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", "true").lower()
         in {"1", "true", "yes", "on"},

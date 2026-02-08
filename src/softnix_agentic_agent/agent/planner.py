@@ -13,6 +13,9 @@ Return STRICT JSON only with shape:
   "thought": "short reasoning",
   "done": boolean,
   "final_output": "string when done=true else optional",
+  "validations": [
+    {"type": "file_exists|text_in_file", "path": "relative/path", "contains": "optional for text_in_file"}
+  ],
   "actions": [
     {"name": "list_dir|read_file|write_workspace_file|write_file|run_safe_command|run_shell_command|run_python_code|web_fetch", "params": {...}}
   ]
@@ -25,6 +28,7 @@ Rules:
 - For file transformation tasks, done=true is allowed only after output file is actually created and verified.
 - If you create a script, you must execute it (run_python_code or run_shell_command) in a later action.
 - After execution, verify expected output with list_dir/read_file before done=true.
+- For done=true, provide `validations` whenever objective checks are known (especially output files).
 - For file actions, always use params.path (not file_path).
 - Use paths relative to workspace (e.g. "index.html", "assets/app.js"), never absolute paths.
 - For web fetch, use params.url with full http/https URL.
@@ -36,8 +40,13 @@ Rules:
   - use params.code as full Python script
   - optional params.path for script path under workspace
   - optional params.args as string array
+  - if setting python_bin, use "python" (never "python3")
 - For run_shell_command / run_safe_command:
   - command base must be allowlisted
+  - optional params.args as string array for command arguments
+  - to save command output to file, use params.stdout_path / params.stderr_path
+  - do not rely on shell redirection operators like `>` or `2>&1`
+  - when running Python in shell command, use `python` (not `python3`)
   - never use destructive or privileged commands
   - if using rm, always include at least one target path in the same command
   - for deletion tasks, verify removal using list_dir/read_file before done=true

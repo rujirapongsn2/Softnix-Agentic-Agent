@@ -44,7 +44,14 @@
 - เป้าหมาย: ให้ Agent วิเคราะห์ วางแผน เขียนโค้ด และรันโค้ดแบบอิสระเพื่อทำงานจนจบ โดยไม่เพิ่ม tool เฉพาะ domain
 - งานหลัก:
   - สร้าง execution runtime/sandbox สำหรับรันโค้ด (resource limits: cpu/memory/timeout/disk)
+    - ความคืบหน้า:
+      - เพิ่ม runtime abstraction `host|container` และ container sandbox baseline (docker run + cpu/memory/pids/network limits)
+      - เพิ่ม container lifecycle `per_run` (run-scoped persistent container + docker exec + shutdown เมื่อ run จบ)
+    - แผนถัดไป:
+      - prebuilt image strategy ต่อ skill set
+      - dependency cache strategy ระหว่าง runs
   - นิยาม action กลางสำหรับวงจร `generate -> run -> validate -> refine`
+    - ความคืบหน้า: เพิ่ม objective validation baseline ใน loop (ตรวจเงื่อนไขก่อนยอม `done=true`)
   - เพิ่ม workspace governance (input/working/output zones + artifact snapshot)
   - เพิ่ม safety policy สำหรับคำสั่งอิสระ (allow/deny + approval gate)
   - เพิ่ม structured logs/traces สำหรับแผน โค้ด คำสั่ง และผลลัพธ์ต่อ iteration

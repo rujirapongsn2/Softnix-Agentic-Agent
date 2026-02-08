@@ -53,6 +53,13 @@ def test_security_config_from_env(tmp_path: Path, monkeypatch) -> None:
 def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".env").write_text(
         "SOFTNIX_EXEC_TIMEOUT_SEC=45\n"
+        "SOFTNIX_EXEC_RUNTIME=container\n"
+        "SOFTNIX_EXEC_CONTAINER_LIFECYCLE=per_run\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE=python:3.12-slim\n"
+        "SOFTNIX_EXEC_CONTAINER_NETWORK=none\n"
+        "SOFTNIX_EXEC_CONTAINER_CPUS=1.5\n"
+        "SOFTNIX_EXEC_CONTAINER_MEMORY=768m\n"
+        "SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=300\n"
         "SOFTNIX_MAX_ACTION_OUTPUT_CHARS=5000\n"
         "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n",
         encoding="utf-8",
@@ -60,11 +67,25 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("SOFTNIX_EXEC_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_RUNTIME", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_LIFECYCLE", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_NETWORK", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_CPUS", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_MEMORY", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT", raising=False)
     monkeypatch.delenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", raising=False)
     monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
 
     settings = load_settings()
     assert settings.exec_timeout_sec == 45
+    assert settings.exec_runtime == "container"
+    assert settings.exec_container_lifecycle == "per_run"
+    assert settings.exec_container_image == "python:3.12-slim"
+    assert settings.exec_container_network == "none"
+    assert settings.exec_container_cpus == 1.5
+    assert settings.exec_container_memory == "768m"
+    assert settings.exec_container_pids_limit == 300
     assert settings.max_action_output_chars == 5000
     assert settings.web_fetch_tls_verify is False
 
