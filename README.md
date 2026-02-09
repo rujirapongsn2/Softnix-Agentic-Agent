@@ -158,6 +158,7 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `GET /system/config` อ่าน effective runtime config (safe fields)
 - `POST /telegram/webhook` รับ Telegram webhook update (public endpoint, แนะนำให้เปิด secret verify)
 - `POST /telegram/poll` ดึง updates แบบ manual 1 รอบ (สำหรับ dev/polling)
+- `GET /telegram/metrics` อ่าน command/error/latency metrics ของ Telegram gateway
 
 เมื่อเปิด `SOFTNIX_API_KEY`:
 - ทุก request ที่เข้าถึง API หลักต้องส่ง header `x-api-key: <your-key>`
@@ -296,6 +297,11 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - `/status <run_id>`
 - `/cancel <run_id>`
 - `/resume <run_id>`
+
+พฤติกรรมหลัง `/run`:
+- bot จะตอบ `Started run: <run_id>` ทันที
+- เมื่อ run จบ bot จะส่ง final summary ของสถานะ (`completed|failed|canceled`)
+- ถ้ามี artifacts ระบบจะส่งไฟล์ล่าสุดกลับ Telegram อัตโนมัติ (สูงสุด 3 ไฟล์)
 
 ### G) Troubleshooting ที่พบบ่อย
 

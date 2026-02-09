@@ -123,8 +123,8 @@
   - [x] สร้าง module `telegram_gateway` (adapter ระหว่าง Telegram Bot API กับระบบ run)
   - [x] รองรับ command contract พื้นฐาน (`/run`, `/status`, `/cancel`, `/resume`, `/pending`, `/help`)
   - [x] เพิ่ม env config หลัก (`BOT_TOKEN`, `ALLOWED_CHAT_IDS`, `MODE`, `WEBHOOK_SECRET`, limits)
-  - [ ] เพิ่ม artifact delivery (`sendDocument`) + ข้อความสรุปผลท้าย run
-  - [ ] เพิ่ม command latency/error metrics สำหรับ Telegram flows
+  - [x] เพิ่ม artifact delivery (`sendDocument`) + ข้อความสรุปผลท้าย run
+  - [x] เพิ่ม command latency/error metrics สำหรับ Telegram flows (`GET /telegram/metrics`)
 - งานหลัก (Phase 2: Hardening):
   - access control ต่อ chat/user + anti-abuse (rate limit, cooldown, retry)
   - idempotency และ dedup สำหรับ message update ซ้ำ

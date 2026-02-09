@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +23,17 @@ class TelegramClient:
         resp.raise_for_status()
         return resp.json()
 
+    def send_document(self, chat_id: str, file_path: Path, caption: str = "") -> dict[str, Any]:
+        with file_path.open("rb") as fh:
+            resp = httpx.post(
+                f"{self.base_url}/sendDocument",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"document": (file_path.name, fh)},
+                timeout=self.timeout_sec,
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     def get_updates(self, offset: int | None = None, timeout: int = 0, limit: int = 20) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"timeout": timeout, "limit": limit}
         if offset is not None:
@@ -30,4 +42,3 @@ class TelegramClient:
         resp.raise_for_status()
         body = resp.json()
         return list(body.get("result") or [])
-

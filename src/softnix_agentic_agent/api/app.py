@@ -40,6 +40,7 @@ app = FastAPI(title="Softnix Agentic Agent API", version="0.1.0")
 _settings = load_settings()
 _store = FilesystemStore(_settings.runs_dir)
 _threads: dict[str, threading.Thread] = {}
+_telegram_gateway: TelegramGateway | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -263,13 +264,16 @@ def _safe_int(value: str | None) -> int:
 
 
 def _build_telegram_gateway() -> TelegramGateway:
+    global _telegram_gateway
     if not _settings.telegram_enabled:
         raise HTTPException(status_code=503, detail="telegram gateway disabled")
     if not _settings.telegram_bot_token:
         raise HTTPException(status_code=503, detail="telegram bot token not configured")
     if not _settings.telegram_allowed_chat_ids:
         raise HTTPException(status_code=503, detail="telegram allowed chat ids not configured")
-    return TelegramGateway(settings=_settings, store=_store, thread_registry=_threads)
+    if _telegram_gateway is None:
+        _telegram_gateway = TelegramGateway(settings=_settings, store=_store, thread_registry=_threads)
+    return _telegram_gateway
 
 
 def _require_memory_admin_key(x_memory_admin_key: str | None, query_key: str | None) -> None:
@@ -507,6 +511,12 @@ def telegram_webhook(
 def telegram_poll(limit: int = Query(default=20, ge=1, le=100)) -> dict:
     gateway = _build_telegram_gateway()
     return gateway.poll_once(limit=limit)
+
+
+@app.get("/telegram/metrics")
+def telegram_metrics() -> dict:
+    gateway = _build_telegram_gateway()
+    return gateway.get_metrics()
 
 
 @app.get("/system/config")

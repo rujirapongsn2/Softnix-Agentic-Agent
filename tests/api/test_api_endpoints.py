@@ -51,6 +51,7 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(app_module, "_settings", settings)
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
 
     def fake_build_runner(settings, provider_name, model=None):  # type: ignore[no-untyped-def]
         return FakeRunner(store=store, workspace=tmp_path)
@@ -200,6 +201,7 @@ def test_api_requires_key_when_configured(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(app_module, "_settings", settings)
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
 
     def fake_build_runner(settings, provider_name, model=None):  # type: ignore[no-untyped-def]
         return FakeRunner(store=store, workspace=tmp_path)
@@ -265,6 +267,7 @@ def test_runs_are_sorted_by_latest_updated_at(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(app_module, "_settings", settings)
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
 
     client = TestClient(app_module.app)
     resp = client.get("/runs")
@@ -289,6 +292,9 @@ def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
         def poll_once(self, limit=20):  # type: ignore[no-untyped-def]
             return {"updates": 1, "handled": 1, "limit": limit}
 
+        def get_metrics(self):  # type: ignore[no-untyped-def]
+            return {"commands_total": 3, "avg_latency_ms": 12.3}
+
     settings = Settings(
         runs_dir=tmp_path / "runs",
         workspace=tmp_path,
@@ -304,6 +310,7 @@ def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(app_module, "_settings", settings)
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
     monkeypatch.setattr(app_module, "TelegramGateway", FakeTelegramGateway)
 
     client = TestClient(app_module.app)
@@ -323,3 +330,7 @@ def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
     assert poll.status_code == 200
     assert poll.json()["handled"] == 1
     assert poll.json()["limit"] == 5
+
+    metrics = client.get("/telegram/metrics")
+    assert metrics.status_code == 200
+    assert metrics.json()["commands_total"] == 3
