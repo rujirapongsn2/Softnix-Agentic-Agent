@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from softnix_agentic_agent.config import load_settings
 from softnix_agentic_agent.integrations.telegram_gateway import TelegramGateway
+from softnix_agentic_agent.memory.admin_control import AdminPrincipal, MemoryAdminControlPlane
 from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
 from softnix_agentic_agent.memory.service import CoreMemoryService
 from softnix_agentic_agent.providers.factory import create_provider
@@ -36,11 +37,22 @@ class MemoryDecisionRequest(BaseModel):
     reason: str | None = None
 
 
+class AdminRotateKeyRequest(BaseModel):
+    new_key: str
+    note: str = ""
+
+
+class AdminRevokeKeyRequest(BaseModel):
+    key_id: str
+    reason: str = ""
+
+
 app = FastAPI(title="Softnix Agentic Agent API", version="0.1.0")
 _settings = load_settings()
 _store = FilesystemStore(_settings.runs_dir)
 _threads: dict[str, threading.Thread] = {}
 _telegram_gateway: TelegramGateway | None = None
+_memory_admin: MemoryAdminControlPlane | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -276,13 +288,30 @@ def _build_telegram_gateway() -> TelegramGateway:
     return _telegram_gateway
 
 
-def _require_memory_admin_key(x_memory_admin_key: str | None, query_key: str | None) -> None:
-    expected = _settings.memory_admin_key or ""
-    if not expected:
+def _build_memory_admin() -> MemoryAdminControlPlane:
+    global _memory_admin
+    if _memory_admin is None:
+        _memory_admin = MemoryAdminControlPlane(
+            keys_path=_settings.memory_admin_keys_path,
+            audit_path=_settings.memory_admin_audit_path,
+            legacy_admin_key=_settings.memory_admin_key,
+            external_admin_keys=_settings.memory_admin_keys,
+        )
+    return _memory_admin
+
+
+def _require_memory_admin_key(
+    x_memory_admin_key: str | None,
+    query_key: str | None,
+) -> AdminPrincipal:
+    admin = _build_memory_admin()
+    if not admin.is_configured():
         raise HTTPException(status_code=403, detail="memory admin key not configured")
     provided = (x_memory_admin_key or query_key or "").strip()
-    if not secrets.compare_digest(provided, expected):
+    principal = admin.authenticate(provided)
+    if principal is None:
         raise HTTPException(status_code=401, detail="unauthorized")
+    return principal
 
 
 @app.get("/runs/{run_id}/events")
@@ -295,7 +324,8 @@ def reload_memory_policy(
     x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
     memory_admin_key: str | None = Query(default=None),
 ) -> dict:
-    _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    principal = _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    admin = _build_memory_admin()
     memory_store = MarkdownMemoryStore(
         workspace=_settings.workspace,
         policy_path=_settings.memory_policy_path,
@@ -312,6 +342,15 @@ def reload_memory_policy(
     policy_entries = memory_store.load_scope("policy")
     allow_tools = sorted(memory.get_policy_allow_tools() or [])
     policy_file = _settings.memory_policy_path.resolve()
+    admin.audit(
+        action="policy_reload",
+        actor=principal,
+        status="ok",
+        detail={
+            "policy_path": str(policy_file),
+            "policy_entry_count": len(policy_entries),
+        },
+    )
     return {
         "status": "reloaded",
         "policy_path": str(policy_file),
@@ -319,6 +358,79 @@ def reload_memory_policy(
         "policy_allow_tools": allow_tools,
         "policy_modified_at": policy_file.stat().st_mtime if policy_file.exists() else 0,
     }
+
+
+@app.get("/admin/memory/keys")
+def list_memory_admin_keys(
+    x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
+    memory_admin_key: str | None = Query(default=None),
+) -> dict:
+    principal = _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    admin = _build_memory_admin()
+    admin.audit(action="list_keys", actor=principal, status="ok", detail={})
+    return {"items": admin.list_keys()}
+
+
+@app.post("/admin/memory/keys/rotate")
+def rotate_memory_admin_key(
+    payload: AdminRotateKeyRequest,
+    x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
+    memory_admin_key: str | None = Query(default=None),
+) -> dict:
+    principal = _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    admin = _build_memory_admin()
+    try:
+        created = admin.rotate_key(new_key=payload.new_key, note=payload.note, actor=principal)
+    except ValueError as exc:
+        admin.audit(
+            action="rotate_key",
+            actor=principal,
+            status="error",
+            detail={"reason": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "rotated", "item": created}
+
+
+@app.post("/admin/memory/keys/revoke")
+def revoke_memory_admin_key(
+    payload: AdminRevokeKeyRequest,
+    x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
+    memory_admin_key: str | None = Query(default=None),
+) -> dict:
+    principal = _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    admin = _build_memory_admin()
+    try:
+        changed = admin.revoke_key(key_id=payload.key_id, reason=payload.reason, actor=principal)
+    except ValueError as exc:
+        admin.audit(
+            action="revoke_key",
+            actor=principal,
+            status="error",
+            detail={"reason": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        admin.audit(
+            action="revoke_key",
+            actor=principal,
+            status="error",
+            detail={"reason": "key not found", "key_id": payload.key_id},
+        )
+        raise HTTPException(status_code=404, detail="key not found") from exc
+    return {"status": "revoked", "item": changed}
+
+
+@app.get("/admin/memory/audit")
+def get_memory_admin_audit(
+    limit: int = Query(default=100, ge=1, le=1000),
+    x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
+    memory_admin_key: str | None = Query(default=None),
+) -> dict:
+    principal = _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    admin = _build_memory_admin()
+    admin.audit(action="read_audit", actor=principal, status="ok", detail={"limit": limit})
+    return {"items": admin.read_audit(limit=limit)}
 
 
 @app.get("/runs/{run_id}/memory/pending")
@@ -521,6 +633,7 @@ def telegram_metrics() -> dict:
 
 @app.get("/system/config")
 def system_config() -> dict:
+    admin = _build_memory_admin()
     return {
         "provider": _settings.provider,
         "model": _settings.model,
@@ -552,7 +665,10 @@ def system_config() -> dict:
         "memory_inferred_min_confidence": _settings.memory_inferred_min_confidence,
         "memory_pending_alert_threshold": _settings.memory_pending_alert_threshold,
         "no_progress_repeat_threshold": _settings.no_progress_repeat_threshold,
-        "memory_admin_configured": bool(_settings.memory_admin_key),
+        "memory_admin_configured": admin.is_configured(),
+        "memory_admin_keys_path": str(_settings.memory_admin_keys_path),
+        "memory_admin_audit_path": str(_settings.memory_admin_audit_path),
+        "memory_admin_external_keys_count": len(_settings.memory_admin_keys),
         "telegram_enabled": _settings.telegram_enabled,
         "telegram_mode": _settings.telegram_mode,
         "telegram_allowed_chat_ids_count": len(_settings.telegram_allowed_chat_ids),

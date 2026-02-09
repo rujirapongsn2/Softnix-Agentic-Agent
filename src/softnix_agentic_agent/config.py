@@ -51,6 +51,9 @@ class Settings:
     memory_inferred_min_confidence: float = 0.75
     memory_pending_alert_threshold: int = 10
     memory_admin_key: str | None = None
+    memory_admin_keys: list[str] = None  # type: ignore[assignment]
+    memory_admin_keys_path: Path = Path(".softnix/system/MEMORY_ADMIN_KEYS.json")
+    memory_admin_audit_path: Path = Path(".softnix/system/MEMORY_ADMIN_AUDIT.jsonl")
     telegram_enabled: bool = False
     telegram_mode: str = "polling"
     telegram_bot_token: str | None = None
@@ -78,6 +81,8 @@ class Settings:
             self.exec_container_image_qa = self.exec_container_image
         if self.telegram_allowed_chat_ids is None:
             self.telegram_allowed_chat_ids = []
+        if self.memory_admin_keys is None:
+            self.memory_admin_keys = []
 
 
 def load_settings() -> Settings:
@@ -160,6 +165,13 @@ def load_settings() -> Settings:
         memory_inferred_min_confidence=float(os.getenv("SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE", "0.75")),
         memory_pending_alert_threshold=int(os.getenv("SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD", "10")),
         memory_admin_key=os.getenv("SOFTNIX_MEMORY_ADMIN_KEY"),
+        memory_admin_keys=_parse_csv(os.getenv("SOFTNIX_MEMORY_ADMIN_KEYS", "")),
+        memory_admin_keys_path=Path(
+            os.getenv("SOFTNIX_MEMORY_ADMIN_KEYS_PATH", ".softnix/system/MEMORY_ADMIN_KEYS.json")
+        ),
+        memory_admin_audit_path=Path(
+            os.getenv("SOFTNIX_MEMORY_ADMIN_AUDIT_PATH", ".softnix/system/MEMORY_ADMIN_AUDIT.jsonl")
+        ),
         telegram_enabled=os.getenv("SOFTNIX_TELEGRAM_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
         telegram_mode=os.getenv("SOFTNIX_TELEGRAM_MODE", "polling"),
         telegram_bot_token=os.getenv("SOFTNIX_TELEGRAM_BOT_TOKEN"),

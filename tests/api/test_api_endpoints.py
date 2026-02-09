@@ -52,6 +52,7 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
     monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
 
     def fake_build_runner(settings, provider_name, model=None):  # type: ignore[no-untyped-def]
         return FakeRunner(store=store, workspace=tmp_path)
@@ -202,6 +203,7 @@ def test_api_requires_key_when_configured(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
     monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
 
     def fake_build_runner(settings, provider_name, model=None):  # type: ignore[no-untyped-def]
         return FakeRunner(store=store, workspace=tmp_path)
@@ -268,6 +270,7 @@ def test_runs_are_sorted_by_latest_updated_at(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
     monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
 
     client = TestClient(app_module.app)
     resp = client.get("/runs")
@@ -311,6 +314,7 @@ def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(app_module, "_store", store)
     monkeypatch.setattr(app_module, "_threads", {})
     monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
     monkeypatch.setattr(app_module, "TelegramGateway", FakeTelegramGateway)
 
     client = TestClient(app_module.app)
@@ -334,3 +338,62 @@ def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
     metrics = client.get("/telegram/metrics")
     assert metrics.status_code == 200
     assert metrics.json()["commands_total"] == 3
+
+
+def test_memory_admin_key_control_plane_rotate_revoke_and_audit(monkeypatch, tmp_path: Path) -> None:
+    from softnix_agentic_agent.api import app as app_module
+
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        memory_admin_key="legacy-admin",
+        memory_admin_keys_path=tmp_path / ".softnix/system/keys.json",
+        memory_admin_audit_path=tmp_path / ".softnix/system/audit.jsonl",
+    )
+    store = FilesystemStore(settings.runs_dir)
+
+    monkeypatch.setattr(app_module, "_settings", settings)
+    monkeypatch.setattr(app_module, "_store", store)
+    monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
+
+    client = TestClient(app_module.app)
+
+    keys_before = client.get("/admin/memory/keys", headers={"x-memory-admin-key": "legacy-admin"})
+    assert keys_before.status_code == 200
+    assert keys_before.json()["items"] == []
+
+    rotate = client.post(
+        "/admin/memory/keys/rotate",
+        headers={"x-memory-admin-key": "legacy-admin"},
+        json={"new_key": "rotated-admin-1", "note": "first rotate"},
+    )
+    assert rotate.status_code == 200
+    key_id = rotate.json()["item"]["key_id"]
+
+    keys_after = client.get("/admin/memory/keys", headers={"x-memory-admin-key": "legacy-admin"})
+    assert keys_after.status_code == 200
+    assert any(item["key_id"] == key_id and item["status"] == "active" for item in keys_after.json()["items"])
+
+    reload_with_rotated = client.post("/admin/memory/policy/reload", headers={"x-memory-admin-key": "rotated-admin-1"})
+    assert reload_with_rotated.status_code == 200
+    assert reload_with_rotated.json()["status"] == "reloaded"
+
+    revoke = client.post(
+        "/admin/memory/keys/revoke",
+        headers={"x-memory-admin-key": "legacy-admin"},
+        json={"key_id": key_id, "reason": "rotate out"},
+    )
+    assert revoke.status_code == 200
+    assert revoke.json()["item"]["status"] == "revoked"
+
+    reload_after_revoke = client.post("/admin/memory/policy/reload", headers={"x-memory-admin-key": "rotated-admin-1"})
+    assert reload_after_revoke.status_code == 401
+
+    audit = client.get("/admin/memory/audit?limit=20", headers={"x-memory-admin-key": "legacy-admin"})
+    assert audit.status_code == 200
+    actions = [item.get("action") for item in audit.json()["items"]]
+    assert "rotate_key" in actions
+    assert "revoke_key" in actions

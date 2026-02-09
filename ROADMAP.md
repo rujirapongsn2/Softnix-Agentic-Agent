@@ -2,7 +2,7 @@
 
 เอกสารนี้สรุปแผนงานถัดไป โดยเรียงตามลำดับความสำคัญ (สูง -> ต่ำ)
 
-## สถานะล่าสุด (อัปเดต 2026-02-09)
+## สถานะล่าสุด (อัปเดต 2026-02-10)
 
 ### เสร็จแล้ว
 
@@ -81,13 +81,29 @@
   - เพิ่ม artifact delivery กลับ Telegram ด้วย `sendDocument` (ล่าสุดสูงสุด 3 ไฟล์)
   - ปรับ Web UI ให้ auto-refresh run list และ auto-follow run ใหม่จาก external trigger (เช่น Telegram) เพื่อให้เห็น Conversation Timeline แบบ near real-time
 
+5. Core Memory hardening (Phase 3B) - started
+- ส่งมอบแล้ว:
+  - เพิ่ม Memory Admin Control Plane สำหรับจัดการ admin keys แบบหลายแหล่ง:
+    - legacy key (`SOFTNIX_MEMORY_ADMIN_KEY`)
+    - env key list (`SOFTNIX_MEMORY_ADMIN_KEYS`)
+    - local rotated keys (`SOFTNIX_MEMORY_ADMIN_KEYS_PATH`)
+  - เพิ่ม admin audit log (`SOFTNIX_MEMORY_ADMIN_AUDIT_PATH`)
+  - เพิ่ม admin endpoints:
+    - `GET /admin/memory/keys`
+    - `POST /admin/memory/keys/rotate`
+    - `POST /admin/memory/keys/revoke`
+    - `GET /admin/memory/audit`
+  - เพิ่ม test coverage สำหรับ rotate/revoke/audit flow
+
 ## P0 (ต้องทำก่อน)
 
 1. Core Memory hardening (Phase 3B)
 - เป้าหมาย: ปิดงาน hardening ฝั่ง admin control plane ให้พร้อม production
 - งานหลัก:
-  - admin policy control plane ที่รองรับ key rotation/secret store integration
-  - นโยบายสิทธิ์และ audit สำหรับ admin operations (reload/changes)
+  - [x] admin policy control plane ที่รองรับ key rotation (local keyring + legacy/env keys)
+  - [x] audit สำหรับ admin operations (reload/changes/rotate/revoke/read)
+  - [ ] secret store integration (เช่น Vault/KMS/Secrets Manager)
+  - [ ] role-based authorization (แยกสิทธิ์ read/rotate/revoke/reload)
 - ผลลัพธ์: memory governance พร้อมใช้งาน production โดยมี admin boundary ชัดเจน
 
 2. Autonomous code execution framework (No special-purpose tools)

@@ -128,7 +128,10 @@ def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_MEMORY_PROMPT_MAX_ITEMS=9\n"
         "SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE=0.9\n"
         "SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD=7\n"
-        "SOFTNIX_MEMORY_ADMIN_KEY=mem-admin\n",
+        "SOFTNIX_MEMORY_ADMIN_KEY=mem-admin\n"
+        "SOFTNIX_MEMORY_ADMIN_KEYS=mk1,mk2\n"
+        "SOFTNIX_MEMORY_ADMIN_KEYS_PATH=.softnix/system/ADMIN_KEYS.json\n"
+        "SOFTNIX_MEMORY_ADMIN_AUDIT_PATH=.softnix/system/ADMIN_AUDIT.jsonl\n",
         encoding="utf-8",
     )
 
@@ -140,6 +143,9 @@ def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE", raising=False)
     monkeypatch.delenv("SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_MEMORY_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_ADMIN_KEYS", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_ADMIN_KEYS_PATH", raising=False)
+    monkeypatch.delenv("SOFTNIX_MEMORY_ADMIN_AUDIT_PATH", raising=False)
 
     settings = load_settings()
     assert settings.memory_profile_file == "MY_PROFILE.md"
@@ -149,6 +155,9 @@ def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.memory_inferred_min_confidence == 0.9
     assert settings.memory_pending_alert_threshold == 7
     assert settings.memory_admin_key == "mem-admin"
+    assert settings.memory_admin_keys == ["mk1", "mk2"]
+    assert str(settings.memory_admin_keys_path) == ".softnix/system/ADMIN_KEYS.json"
+    assert str(settings.memory_admin_audit_path) == ".softnix/system/ADMIN_AUDIT.jsonl"
 
 
 def test_telegram_config_from_env(tmp_path: Path, monkeypatch) -> None:

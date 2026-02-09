@@ -100,7 +100,10 @@ pip install -e '.[dev]'
 - `SOFTNIX_MEMORY_PROMPT_MAX_ITEMS` จำนวน memory items สูงสุดที่ inject เข้า planner prompt
 - `SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE` ค่าขั้นต่ำ (0-1) สำหรับ staging inferred memory
 - `SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD` จำนวน pending ขั้นต่ำที่จะเริ่ม log alert backlog
-- `SOFTNIX_MEMORY_ADMIN_KEY` คีย์สำหรับ admin-only memory endpoints (เช่น policy reload)
+- `SOFTNIX_MEMORY_ADMIN_KEY` legacy admin key เดี่ยว (ยังรองรับ)
+- `SOFTNIX_MEMORY_ADMIN_KEYS` รายการ admin keys จาก env (comma-separated)
+- `SOFTNIX_MEMORY_ADMIN_KEYS_PATH` path keyring สำหรับ local rotated keys
+- `SOFTNIX_MEMORY_ADMIN_AUDIT_PATH` path audit log ของ admin operations
 - `SOFTNIX_TELEGRAM_ENABLED` เปิด/ปิด Telegram Gateway (`true`/`false`)
 - `SOFTNIX_TELEGRAM_MODE` โหมด gateway (`polling` หรือ `webhook`)
 - `SOFTNIX_TELEGRAM_BOT_TOKEN` bot token จาก Telegram
@@ -149,6 +152,10 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `POST /runs/{id}/memory/reject` ปฏิเสธ pending memory ด้วย key แบบ explicit
 - `GET /runs/{id}/memory/metrics` อ่าน memory metrics (pending backlog / compact failures / policy tools)
 - `POST /admin/memory/policy/reload` trigger policy reload summary (ต้องใช้ `x-memory-admin-key`)
+- `GET /admin/memory/keys` อ่านรายการ admin keys (masked metadata)
+- `POST /admin/memory/keys/rotate` เพิ่ม local admin key ใหม่
+- `POST /admin/memory/keys/revoke` revoke local admin key
+- `GET /admin/memory/audit` อ่าน admin audit log
 - `POST /runs/{id}/cancel` ส่งคำขอหยุด run
 - `POST /runs/{id}/resume` สั่ง resume run
 - `GET /skills` อ่านรายการ skills
@@ -462,7 +469,13 @@ SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=true
   - `POST /runs/{run_id}/memory/reject`
 - มี endpoint metrics สำหรับ observability: `GET /runs/{run_id}/memory/metrics`
 - support policy guard (`policy.allow.tools`) แบบ hot-reload ต่อ iteration และบล็อก action ที่ไม่ถูกอนุญาต
-- รองรับ admin policy reload endpoint: `POST /admin/memory/policy/reload` (ใช้ `SOFTNIX_MEMORY_ADMIN_KEY`)
+- รองรับ admin control plane:
+  - `POST /admin/memory/policy/reload`
+  - `GET /admin/memory/keys`
+  - `POST /admin/memory/keys/rotate`
+  - `POST /admin/memory/keys/revoke`
+  - `GET /admin/memory/audit`
+- รองรับ admin key ได้ 3 แหล่ง: legacy key เดี่ยว (`SOFTNIX_MEMORY_ADMIN_KEY`), env key list (`SOFTNIX_MEMORY_ADMIN_KEYS`), และ local rotated keys ใน `SOFTNIX_MEMORY_ADMIN_KEYS_PATH`
 
 ### One-click test script
 
