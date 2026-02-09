@@ -113,6 +113,7 @@ class AgentLoopRunner:
             exec_container_pids_limit=self.settings.exec_container_pids_limit,
             exec_container_cache_dir=self.settings.exec_container_cache_dir,
             exec_container_pip_cache_enabled=self.settings.exec_container_pip_cache_enabled,
+            exec_container_env_vars=self.settings.exec_container_env_vars,
             run_id=state.run_id,
             max_output_chars=self.settings.max_action_output_chars,
             web_fetch_tls_verify=self.settings.web_fetch_tls_verify,
@@ -120,6 +121,7 @@ class AgentLoopRunner:
         previous_iteration_signature = ""
         repeated_iteration_count = 0
         produced_files_in_run: set[str] = set()
+        previous_iteration_had_failed_action = False
 
         try:
             if state.iteration == 0:
@@ -180,7 +182,12 @@ class AgentLoopRunner:
                 actions = plan.get("actions", []) if isinstance(plan.get("actions", []), list) else []
                 action_results = []
                 for action in actions:
-                    prepared_action = self._prepare_action(action, state.task, Path(state.workspace))
+                    prepared_action = self._prepare_action(
+                        action,
+                        state.task,
+                        Path(state.workspace),
+                        Path(state.skills_dir),
+                    )
                     action_name = str(prepared_action.get("name", ""))
                     if not self._is_action_allowed_by_policy(action_name, memory):
                         error = f"blocked by policy.allow.tools: {action_name}"
@@ -244,6 +251,25 @@ class AgentLoopRunner:
                             for x in action_results
                         ]
                     )
+                has_failed_action = any(not bool(result.get("ok")) for result in action_results)
+
+                if done:
+                    if has_failed_action:
+                        done = False
+                        output = (
+                            (output + "\n\n" if output else "")
+                            + "[validation] failed; continue iterations\n"
+                            + "- current iteration has failed actions"
+                        )
+                        self.store.log_event(state.run_id, "objective validation blocked by failed actions in iteration")
+                    elif previous_iteration_had_failed_action and not actions:
+                        done = False
+                        output = (
+                            (output + "\n\n" if output else "")
+                            + "[validation] failed; continue iterations\n"
+                            + "- previous iteration failed and no recovery action executed"
+                        )
+                        self.store.log_event(state.run_id, "objective validation blocked by unresolved previous failure")
 
                 if done:
                     validation_report = self._evaluate_objective_validations(
@@ -293,7 +319,6 @@ class AgentLoopRunner:
                     self.store.write_state(state)
                     return state
 
-                has_failed_action = any(not bool(result.get("ok")) for result in action_results)
                 if not has_failed_action:
                     auto_complete_report = self._evaluate_auto_complete_validations(
                         task=state.task,
@@ -312,6 +337,7 @@ class AgentLoopRunner:
                         return state
 
                 self.store.write_state(state)
+                previous_iteration_had_failed_action = has_failed_action
 
                 current_sig = self._build_iteration_signature(actions=actions, action_results=action_results, output=output)
                 if current_sig == previous_iteration_signature:
@@ -450,7 +476,13 @@ class AgentLoopRunner:
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def _prepare_action(self, action: dict[str, Any], task: str, workspace: Path) -> dict[str, Any]:
+    def _prepare_action(
+        self,
+        action: dict[str, Any],
+        task: str,
+        workspace: Path,
+        skills_root: Path,
+    ) -> dict[str, Any]:
         prepared = copy.deepcopy(action)
         name = str(prepared.get("name", ""))
         params = prepared.get("params")
@@ -487,6 +519,12 @@ class AgentLoopRunner:
             python_bin = str(params.get("python_bin", "")).strip()
             if python_bin == "python3":
                 params["python_bin"] = "python"
+            rel_script_path = str(params.get("path", "")).strip()
+            skill_script = self._resolve_skill_script_path(rel_script_path, skills_root)
+            if skill_script is not None and skill_script.suffix == ".py":
+                rel = skill_script.relative_to(skills_root.resolve())
+                params["path"] = str(Path(".softnix_skill_exec") / rel)
+                params["code"] = skill_script.read_text(encoding="utf-8")
             return prepared
 
         return prepared
@@ -520,7 +558,7 @@ class AgentLoopRunner:
         root = workspace.resolve()
         for raw in candidates:
             target = (root / raw).resolve()
-            if not str(target).startswith(str(root)):
+            if not self._is_within_root(target, root):
                 continue
             if target.exists() and target.is_file():
                 safe_targets.append(str(target.relative_to(root)))
@@ -542,7 +580,7 @@ class AgentLoopRunner:
         root = workspace.resolve()
         for raw in candidates:
             target = (root / raw).resolve()
-            if not str(target).startswith(str(root)):
+            if not self._is_within_root(target, root):
                 continue
             if target.exists() and target.is_file():
                 safe_targets.append(str(target.relative_to(root)))
@@ -569,6 +607,27 @@ class AgentLoopRunner:
             "run_shell_command": "run_safe_command",
         }
         return aliases.get(raw, raw)
+
+    def _resolve_skill_script_path(self, value: str, skills_root: Path) -> Path | None:
+        text = (value or "").strip()
+        if not text:
+            return None
+        root = skills_root.resolve()
+        raw = Path(text)
+        candidates: list[Path] = []
+        if raw.is_absolute():
+            candidates.append(raw.resolve())
+        else:
+            candidates.append((root / raw).resolve())
+            parts = raw.parts
+            if parts and parts[0] == root.name:
+                candidates.append((root / Path(*parts[1:])).resolve())
+        for candidate in candidates:
+            if not self._is_within_root(candidate, root):
+                continue
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return None
 
     def _resolve_container_runtime_image(self, task: str, selected_skills: list[Any]) -> tuple[str, str]:
         default_image = self.settings.exec_container_image
@@ -643,7 +702,7 @@ class AgentLoopRunner:
                 failures.append("validation missing path")
                 continue
             target = (root / path_text).resolve()
-            if not str(target).startswith(str(root)):
+            if not self._is_within_root(target, root):
                 failures.append(f"path escapes workspace: {path_text}")
                 continue
             if ctype == "file_exists":
@@ -805,3 +864,10 @@ class AgentLoopRunner:
             seen.add(f)
             uniq.append(f)
         return uniq
+
+    def _is_within_root(self, path: Path, root: Path) -> bool:
+        try:
+            path.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False

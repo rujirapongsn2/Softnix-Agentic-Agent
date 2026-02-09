@@ -29,6 +29,12 @@ type RunDiagnostics = {
   lastIterationDone?: boolean;
 };
 
+type CreateRunDefaults = {
+  provider: string;
+  model: string;
+  maxIters: number;
+};
+
 function ProcessingIndicator({ text = "Agent is processing" }: { text?: string }) {
   return (
     <motion.div
@@ -206,10 +212,12 @@ export function App() {
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [health, setHealth] = useState<Record<string, { ok: boolean; message: string }>>({});
-  const [task, setTask] = useState("Write html javascript for landing page portfolio");
-  const [provider, setProvider] = useState("claude");
-  const [model, setModel] = useState("claude-sonnet-4-5");
-  const [maxIters, setMaxIters] = useState(10);
+  const [task, setTask] = useState("");
+  const [defaults, setDefaults] = useState<CreateRunDefaults>({
+    provider: "openai",
+    model: "gpt-4o-mini",
+    maxIters: 10
+  });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [artifactError, setArtifactError] = useState<string | null>(null);
@@ -303,7 +311,7 @@ export function App() {
   }, [timeline, selectedRunId]);
 
   async function refreshSideData() {
-    await Promise.all([refreshRunsOnly(), refreshSkills(), refreshHealth()]);
+    await Promise.all([refreshRunsOnly(), refreshSkills(), refreshHealth(), refreshSystemConfig()]);
   }
 
   async function refreshRunsOnly() {
@@ -353,6 +361,23 @@ export function App() {
   async function refreshHealth() {
     const res = await apiClient.getHealth();
     setHealth(res.providers);
+  }
+
+  async function refreshSystemConfig() {
+    try {
+      const config = await apiClient.getSystemConfig();
+      const provider = typeof config.provider === "string" && config.provider.trim()
+        ? config.provider.trim()
+        : "openai";
+      const model = typeof config.model === "string" && config.model.trim()
+        ? config.model.trim()
+        : "gpt-4o-mini";
+      const maxItersRaw = Number(config.max_iters);
+      const maxIters = Number.isFinite(maxItersRaw) && maxItersRaw >= 1 ? maxItersRaw : 10;
+      setDefaults({ provider, model, maxIters });
+    } catch {
+      // keep fallback defaults
+    }
   }
 
   async function handleStreamError() {
@@ -435,13 +460,18 @@ export function App() {
 
   async function onCreateRun() {
     try {
+      const trimmedTask = task.trim();
+      if (!trimmedTask) {
+        setError("Please enter a task");
+        return;
+      }
       setPending(true);
       setError(null);
       const created = await apiClient.createRun({
-        task,
-        provider,
-        model,
-        max_iters: maxIters
+        task: trimmedTask,
+        provider: defaults.provider,
+        model: defaults.model,
+        max_iters: defaults.maxIters
       });
       await refreshRunsOnly();
       setSelectedRunId(created.run_id);
@@ -536,18 +566,14 @@ export function App() {
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <label className="text-xs text-muted-foreground">Task</label>
-              <Input value={task} onChange={(e) => setTask(e.target.value)} />
-              <div className="grid grid-cols-2 gap-2">
-                <Input value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="provider" />
-                <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="model" />
-              </div>
               <Input
-                type="number"
-                min={1}
-                max={50}
-                value={maxIters}
-                onChange={(e) => setMaxIters(Number(e.target.value || 10))}
+                value={task}
+                onChange={(e) => setTask(e.target.value)}
+                placeholder="Describe your objective, expected output files, and constraints..."
               />
+              <div className="text-[11px] text-muted-foreground">
+                Runtime defaults are auto-loaded from backend config (.env).
+              </div>
               <Button
                 className="w-full bg-[#2786C2] text-white hover:bg-[#1F6CB0] focus-visible:ring-[#1F6CB0]"
                 onClick={onCreateRun}

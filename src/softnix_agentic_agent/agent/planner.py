@@ -29,6 +29,7 @@ Rules:
 - If you create a script, you must execute it (run_python_code or run_shell_command) in a later action.
 - After execution, verify expected output with list_dir/read_file before done=true.
 - For done=true, provide `validations` whenever objective checks are known (especially output files).
+- If skill context provides `scripts/...`, prefer running that script instead of rewriting equivalent ad-hoc code.
 - For file actions, always use params.path (not file_path).
 - Use paths relative to workspace (e.g. "index.html", "assets/app.js"), never absolute paths.
 - For web fetch, use params.url with full http/https URL.

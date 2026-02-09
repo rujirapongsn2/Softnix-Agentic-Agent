@@ -20,9 +20,9 @@ export interface RunState {
 
 export interface RunCreatePayload {
   task: string;
-  provider: string;
+  provider?: string;
   model?: string;
-  max_iters: number;
+  max_iters?: number;
   skills_dir?: string;
 }
 

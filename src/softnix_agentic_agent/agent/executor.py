@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -28,6 +29,7 @@ class SafeActionExecutor:
         exec_container_pids_limit: int = 256,
         exec_container_cache_dir: Path | None = None,
         exec_container_pip_cache_enabled: bool = True,
+        exec_container_env_vars: list[str] | None = None,
         run_id: str = "",
         max_output_chars: int = 12000,
         web_fetch_tls_verify: bool = True,
@@ -51,6 +53,7 @@ class SafeActionExecutor:
         cache_dir = exec_container_cache_dir or (self.workspace / ".softnix/container-cache")
         self.exec_container_cache_dir = Path(cache_dir).resolve()
         self.exec_container_pip_cache_enabled = bool(exec_container_pip_cache_enabled)
+        self.exec_container_env_vars = [str(x).strip() for x in (exec_container_env_vars or []) if str(x).strip()]
         if self.exec_container_pip_cache_enabled:
             self.exec_container_cache_dir.mkdir(parents=True, exist_ok=True)
         self.run_id = (run_id or "").strip()
@@ -89,7 +92,7 @@ class SafeActionExecutor:
             p = raw.resolve()
         else:
             p = (self.workspace / raw).resolve()
-        if not str(p).startswith(str(self.workspace)):
+        if not self._is_within_workspace(p):
             raise ValueError("Path escapes workspace")
         return p
 
@@ -396,6 +399,7 @@ class SafeActionExecutor:
             "-w",
             "/workspace",
         ]
+        command.extend(self._build_container_env_flags())
         if self.exec_container_pip_cache_enabled:
             command.extend(["-v", f"{self.exec_container_cache_dir}:/root/.cache/pip"])
         command.extend([self.exec_container_image, *mapped])
@@ -422,6 +426,7 @@ class SafeActionExecutor:
             "-w",
             "/workspace",
         ]
+        command.extend(self._build_container_env_flags())
         if self.exec_container_pip_cache_enabled:
             command.extend(["-v", f"{self.exec_container_cache_dir}:/root/.cache/pip"])
         command.extend([self.exec_container_image, "sh", "-lc", "while true; do sleep 3600; done"])
@@ -437,7 +442,7 @@ class SafeActionExecutor:
             resolved = Path(text).resolve()
         except Exception:
             return text
-        if not str(resolved).startswith(str(self.workspace)):
+        if not self._is_within_workspace(resolved):
             return text
         rel = resolved.relative_to(self.workspace)
         return str(Path("/workspace") / rel)
@@ -471,3 +476,20 @@ class SafeActionExecutor:
         if not safe:
             safe = "runtime"
         return f"softnix-run-{safe}"
+
+    def _build_container_env_flags(self) -> list[str]:
+        flags: list[str] = []
+        for key in self.exec_container_env_vars:
+            if not key:
+                continue
+            if os.getenv(key, "").strip():
+                # Use "-e KEY" (without value) so docker reads from host env and avoids embedding secret in args.
+                flags.extend(["-e", key])
+        return flags
+
+    def _is_within_workspace(self, path: Path) -> bool:
+        try:
+            path.resolve().relative_to(self.workspace)
+            return True
+        except ValueError:
+            return False

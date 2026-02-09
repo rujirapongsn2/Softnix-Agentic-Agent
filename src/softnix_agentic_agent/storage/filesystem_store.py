@@ -103,14 +103,14 @@ class FilesystemStore:
     def resolve_artifact_path(self, run_id: str, artifact_path: str) -> Path:
         artifacts_dir = (self.run_dir(run_id) / "artifacts").resolve()
         target = (artifacts_dir / artifact_path).resolve()
-        if not str(target).startswith(str(artifacts_dir)):
+        if not _is_within(target, artifacts_dir):
             raise ValueError("artifact path escapes artifacts directory")
         return target
 
     def snapshot_workspace_file(self, run_id: str, workspace: Path, file_path: str) -> str:
         workspace_root = workspace.resolve()
         source = (workspace_root / file_path).resolve()
-        if not str(source).startswith(str(workspace_root)):
+        if not _is_within(source, workspace_root):
             raise ValueError("workspace file path escapes workspace")
         if not source.exists() or not source.is_file():
             raise FileNotFoundError(f"workspace file not found: {source}")
@@ -153,3 +153,11 @@ class FilesystemStore:
         state.updated_at = utc_now_iso()
         self.write_state(state)
         self.log_event(run_id, "cancel requested")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False

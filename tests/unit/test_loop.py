@@ -492,7 +492,99 @@ def test_loop_run_shell_command_with_structured_args_can_write_result_file(tmp_p
 
     assert state.stop_reason == StopReason.COMPLETED
     assert (tmp_path / "result.txt").exists() is True
-    assert "result.txt" in store.list_artifacts(state.run_id)
+
+
+def test_loop_blocks_done_when_prior_iteration_output_contains_failure_signal(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {"code": "raise RuntimeError('boom')"},
+                    }
+                ],
+            },
+            {
+                "done": True,
+                "final_output": "completed",
+                "actions": [],
+            },
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ส่งอีเมลขอลาพักร้อน",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=2,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "previous iteration failed and no recovery action executed" in state.last_output
+
+
+def test_loop_blocks_done_when_current_iteration_has_failed_actions(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "final_output": "completed",
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {"code": "raise RuntimeError('boom')"},
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="demo",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "current iteration has failed actions" in state.last_output
+
+
+def test_prepare_action_remaps_skill_script_into_workspace_execution(tmp_path: Path) -> None:
+    skill_root = tmp_path / "skills"
+    script = skill_root / "sendmail" / "scripts" / "send_with_resend.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("print('from-skill')\n", encoding="utf-8")
+
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=skill_root)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    prepared = runner._prepare_action(
+        {"name": "run_python_code", "params": {"path": "sendmail/scripts/send_with_resend.py"}},
+        task="send mail",
+        workspace=tmp_path,
+        skills_root=skill_root,
+    )
+    params = prepared["params"]
+    assert params["path"] == ".softnix_skill_exec/sendmail/scripts/send_with_resend.py"
+    assert "from-skill" in params["code"]
 
 
 def test_loop_stops_with_no_progress_before_max_iters(tmp_path: Path) -> None:

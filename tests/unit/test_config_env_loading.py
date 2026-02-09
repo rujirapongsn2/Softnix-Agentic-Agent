@@ -69,6 +69,7 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=300\n"
         "SOFTNIX_EXEC_CONTAINER_CACHE_DIR=.softnix/test-cache\n"
         "SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=false\n"
+        "SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY,OPENAI_API_KEY\n"
         "SOFTNIX_MAX_ACTION_OUTPUT_CHARS=5000\n"
         "SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD=4\n"
         "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n",
@@ -93,6 +94,7 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_CACHE_DIR", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_ENV_VARS", raising=False)
     monkeypatch.delenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", raising=False)
     monkeypatch.delenv("SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
@@ -115,6 +117,7 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.exec_container_pids_limit == 300
     assert str(settings.exec_container_cache_dir) == ".softnix/test-cache"
     assert settings.exec_container_pip_cache_enabled is False
+    assert settings.exec_container_env_vars == ["RESEND_API_KEY", "OPENAI_API_KEY"]
     assert settings.max_action_output_chars == 5000
     assert settings.no_progress_repeat_threshold == 4
     assert settings.web_fetch_tls_verify is False

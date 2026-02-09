@@ -41,6 +41,7 @@ class Settings:
     exec_container_pids_limit: int = 256
     exec_container_cache_dir: Path = Path(".softnix/container-cache")
     exec_container_pip_cache_enabled: bool = True
+    exec_container_env_vars: list[str] = None  # type: ignore[assignment]
     max_action_output_chars: int = 12000
     no_progress_repeat_threshold: int = 3
     web_fetch_tls_verify: bool = True
@@ -83,6 +84,8 @@ class Settings:
             self.telegram_allowed_chat_ids = []
         if self.memory_admin_keys is None:
             self.memory_admin_keys = []
+        if self.exec_container_env_vars is None:
+            self.exec_container_env_vars = ["RESEND_API_KEY"]
 
 
 def load_settings() -> Settings:
@@ -154,6 +157,7 @@ def load_settings() -> Settings:
         exec_container_cache_dir=Path(os.getenv("SOFTNIX_EXEC_CONTAINER_CACHE_DIR", ".softnix/container-cache")),
         exec_container_pip_cache_enabled=os.getenv("SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED", "true").lower()
         in {"1", "true", "yes", "on"},
+        exec_container_env_vars=_parse_csv(os.getenv("SOFTNIX_EXEC_CONTAINER_ENV_VARS", "RESEND_API_KEY")),
         max_action_output_chars=int(os.getenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", "12000")),
         no_progress_repeat_threshold=int(os.getenv("SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD", "3")),
         web_fetch_tls_verify=os.getenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", "true").lower()

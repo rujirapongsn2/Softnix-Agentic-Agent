@@ -105,6 +105,7 @@ pip install -e '.[dev]'
 - `SOFTNIX_EXEC_CONTAINER_CPUS` จำกัด CPU สำหรับ container runtime
 - `SOFTNIX_EXEC_CONTAINER_MEMORY` จำกัด memory สำหรับ container runtime
 - `SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT` จำกัดจำนวน process ภายใน container
+- `SOFTNIX_EXEC_CONTAINER_ENV_VARS` allowlist env vars ที่จะส่งเข้า container runtime (comma-separated, default `RESEND_API_KEY`)
 - `SOFTNIX_MAX_ACTION_OUTPUT_CHARS` จำกัดขนาด output ต่อ action
 - `SOFTNIX_WEB_FETCH_TLS_VERIFY` เปิด/ปิด TLS certificate verification สำหรับ `web_fetch` (default `true`)
 - `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `memory/PROFILE.md`)
@@ -408,6 +409,7 @@ SOFTNIX_EXEC_CONTAINER_MEMORY=512m
 SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=256
 SOFTNIX_EXEC_CONTAINER_CACHE_DIR=.softnix/container-cache
 SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=true
+SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY
 ```
 
 หมายเหตุ:
@@ -421,6 +423,7 @@ SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=true
   - `softnix/runtime-ml:py311` (เพิ่ม scikit-learn/matplotlib)
 - โหมด `per_run` จะสร้าง container หนึ่งตัวต่อ run แล้วใช้ `docker exec` สำหรับ action ถัดไป เพื่อลด overhead และคง dependency ระหว่าง action ใน run เดียวกัน
 - รองรับ pip dependency cache ข้าม run ผ่าน mount path `SOFTNIX_EXEC_CONTAINER_CACHE_DIR` (เปิด/ปิดด้วย `SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED`)
+- รองรับ env passthrough แบบ allowlist เพื่อส่ง secret ที่จำเป็นเข้า runtime เช่น `RESEND_API_KEY` ผ่าน `SOFTNIX_EXEC_CONTAINER_ENV_VARS`
 - รองรับ image profile strategy:
   - `auto`: เลือก profile จาก task/skills (`scraping|ml|qa|web|data|base`) อัตโนมัติ
   - `base|web|data|scraping|ml|qa`: บังคับ profile ตายตัว

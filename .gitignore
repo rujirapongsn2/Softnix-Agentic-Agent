@@ -16,6 +16,7 @@ venv/
 .softnix/
 tmp/
 deploy/local/
+skillpacks/**/.secrets/
 
 # test outputs
 *.log

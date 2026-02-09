@@ -30,12 +30,19 @@ class SkillLoader:
             else:
                 lines.append(f"- {s.name}: {s.description}")
 
+            script_refs = self._script_reference_paths(s)
+            if script_refs:
+                lines.append(f"  scripts: {', '.join(script_refs[:3])}")
+
             # Include a short actionable excerpt for relevant skills so behavior is guided by SKILL.md.
-            excerpt = self._short_body_excerpt(s.body, max_lines=4)
+            excerpt = self._short_body_excerpt(s.body, max_lines=8)
             if excerpt:
                 for ln in excerpt.splitlines():
                     lines.append(f"  {ln}")
-        lines.append("Note: skill references are metadata only; do not read outside workspace.")
+        lines.append(
+            "Note: skill scripts/references under skills_dir are trusted read-only inputs; "
+            "copy to workspace before modification."
+        )
         return "\n".join(lines)
 
     def select_skills(self, task: str = "", limit: int = 8) -> list[SkillDefinition]:
@@ -73,3 +80,15 @@ class SkillLoader:
             if len(rows) >= max_lines:
                 break
         return "\n".join(rows)
+
+    def _script_reference_paths(self, skill: SkillDefinition) -> list[str]:
+        rows: list[str] = []
+        for ref in skill.references:
+            try:
+                rel = ref.resolve().relative_to(skill.path.parent.resolve())
+            except ValueError:
+                continue
+            text = str(rel).replace("\\", "/")
+            if text.startswith("scripts/"):
+                rows.append(text)
+        return rows

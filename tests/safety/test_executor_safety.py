@@ -58,6 +58,20 @@ def test_read_allows_absolute_path_in_workspace(tmp_path: Path) -> None:
     assert result.output == "hello"
 
 
+def test_read_rejects_absolute_path_with_workspace_prefix_but_outside(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "ws2"
+    workspace.mkdir(parents=True, exist_ok=True)
+    outside.mkdir(parents=True, exist_ok=True)
+    secret = outside / "secret.txt"
+    secret.write_text("SECRET", encoding="utf-8")
+
+    ex = SafeActionExecutor(workspace=workspace, safe_commands=["ls"])
+    result = ex.execute({"name": "read_file", "params": {"path": str(secret.resolve())}})
+    assert result.ok is False
+    assert "workspace" in (result.error or "")
+
+
 def test_web_fetch_rejects_localhost(tmp_path: Path) -> None:
     ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["ls"])
     result = ex.execute({"name": "web_fetch", "params": {"url": "http://127.0.0.1:8787"}})
@@ -173,6 +187,31 @@ def test_container_runtime_maps_python_script_path(tmp_path: Path, monkeypatch) 
     assert "/workspace/.softnix_exec/" in joined
 
 
+def test_container_runtime_passes_allowlisted_env_vars(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run(parts, cwd, text, capture_output, timeout, check):  # type: ignore[no-untyped-def]
+        captured["parts"] = parts
+        return subprocess.CompletedProcess(args=parts, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setenv("RESEND_API_KEY", "secret-value")
+    ex = SafeActionExecutor(
+        workspace=tmp_path,
+        safe_commands=["ls"],
+        exec_runtime="container",
+        exec_container_image="python:3.11-slim",
+        exec_container_env_vars=["RESEND_API_KEY"],
+    )
+    result = ex.execute({"name": "run_safe_command", "params": {"command": "ls"}})
+    assert result.ok is True
+    parts = captured["parts"]
+    assert isinstance(parts, list)
+    assert "-e" in parts
+    idx = parts.index("-e")
+    assert parts[idx + 1] == "RESEND_API_KEY"
+
+
 def test_container_runtime_per_run_reuses_container_and_shutdown(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
@@ -203,6 +242,34 @@ def test_container_runtime_per_run_reuses_container_and_shutdown(tmp_path: Path,
     assert calls[1][:2] == ["docker", "exec"]
     assert calls[2][:2] == ["docker", "exec"]
     assert calls[-1][:3] == ["docker", "rm", "-f"]
+
+
+def test_container_runtime_per_run_bootstrap_includes_allowlisted_env(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_run(parts, cwd, text, capture_output, timeout, check):  # type: ignore[no-untyped-def]
+        calls.append([str(x) for x in parts])
+        return subprocess.CompletedProcess(args=parts, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setenv("RESEND_API_KEY", "secret-value")
+    ex = SafeActionExecutor(
+        workspace=tmp_path,
+        safe_commands=["ls"],
+        exec_runtime="container",
+        exec_container_lifecycle="per_run",
+        exec_container_image="python:3.11-slim",
+        exec_container_env_vars=["RESEND_API_KEY"],
+        run_id="run-env",
+    )
+    result = ex.execute({"name": "run_safe_command", "params": {"command": "ls"}})
+    ex.shutdown()
+
+    assert result.ok is True
+    assert calls[0][:2] == ["docker", "run"]
+    assert "-e" in calls[0]
+    idx = calls[0].index("-e")
+    assert calls[0][idx + 1] == "RESEND_API_KEY"
 
 
 def test_run_python_code_can_execute_existing_script_by_path_only(tmp_path: Path) -> None:
