@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from softnix_agentic_agent.config import load_settings
+from softnix_agentic_agent.integrations.telegram_gateway import TelegramGateway
 from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
 from softnix_agentic_agent.memory.service import CoreMemoryService
 from softnix_agentic_agent.providers.factory import create_provider
@@ -50,7 +51,7 @@ app.add_middleware(
 
 
 def _is_public_path(path: str) -> bool:
-    return path in {"/health", "/docs", "/redoc", "/openapi.json"}
+    return path in {"/health", "/docs", "/redoc", "/openapi.json", "/telegram/webhook"}
 
 
 @app.middleware("http")
@@ -259,6 +260,16 @@ def _safe_int(value: str | None) -> int:
         return max(0, int(value.strip()))
     except Exception:
         return 0
+
+
+def _build_telegram_gateway() -> TelegramGateway:
+    if not _settings.telegram_enabled:
+        raise HTTPException(status_code=503, detail="telegram gateway disabled")
+    if not _settings.telegram_bot_token:
+        raise HTTPException(status_code=503, detail="telegram bot token not configured")
+    if not _settings.telegram_allowed_chat_ids:
+        raise HTTPException(status_code=503, detail="telegram allowed chat ids not configured")
+    return TelegramGateway(settings=_settings, store=_store, thread_registry=_threads)
 
 
 def _require_memory_admin_key(x_memory_admin_key: str | None, query_key: str | None) -> None:
@@ -477,6 +488,27 @@ def health() -> dict:
     return {"ok": True, "providers": providers}
 
 
+@app.post("/telegram/webhook")
+def telegram_webhook(
+    payload: dict,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None, alias="x-telegram-bot-api-secret-token"),
+) -> dict:
+    gateway = _build_telegram_gateway()
+    expected = (_settings.telegram_webhook_secret or "").strip()
+    if expected:
+        provided = (x_telegram_bot_api_secret_token or "").strip()
+        if not secrets.compare_digest(provided, expected):
+            raise HTTPException(status_code=401, detail="invalid telegram webhook secret")
+    handled = gateway.handle_update(payload)
+    return {"ok": True, "handled": handled}
+
+
+@app.post("/telegram/poll")
+def telegram_poll(limit: int = Query(default=20, ge=1, le=100)) -> dict:
+    gateway = _build_telegram_gateway()
+    return gateway.poll_once(limit=limit)
+
+
 @app.get("/system/config")
 def system_config() -> dict:
     return {
@@ -511,4 +543,11 @@ def system_config() -> dict:
         "memory_pending_alert_threshold": _settings.memory_pending_alert_threshold,
         "no_progress_repeat_threshold": _settings.no_progress_repeat_threshold,
         "memory_admin_configured": bool(_settings.memory_admin_key),
+        "telegram_enabled": _settings.telegram_enabled,
+        "telegram_mode": _settings.telegram_mode,
+        "telegram_allowed_chat_ids_count": len(_settings.telegram_allowed_chat_ids),
+        "telegram_bot_token_configured": bool(_settings.telegram_bot_token),
+        "telegram_webhook_secret_configured": bool(_settings.telegram_webhook_secret),
+        "telegram_poll_interval_sec": _settings.telegram_poll_interval_sec,
+        "telegram_max_task_chars": _settings.telegram_max_task_chars,
     }

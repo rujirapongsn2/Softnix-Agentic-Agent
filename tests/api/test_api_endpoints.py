@@ -272,3 +272,54 @@ def test_runs_are_sorted_by_latest_updated_at(monkeypatch, tmp_path: Path) -> No
     items = resp.json()["items"]
     assert items[0]["run_id"] == "newrun"
     assert items[1]["run_id"] == "oldrun"
+
+
+def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
+    from softnix_agentic_agent.api import app as app_module
+
+    class FakeTelegramGateway:
+        def __init__(self, settings, store, thread_registry):  # type: ignore[no-untyped-def]
+            self.settings = settings
+            self.store = store
+            self.thread_registry = thread_registry
+
+        def handle_update(self, update):  # type: ignore[no-untyped-def]
+            return bool(update.get("message"))
+
+        def poll_once(self, limit=20):  # type: ignore[no-untyped-def]
+            return {"updates": 1, "handled": 1, "limit": limit}
+
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        telegram_enabled=True,
+        telegram_mode="webhook",
+        telegram_bot_token="telegram-token",
+        telegram_allowed_chat_ids=["1001"],
+        telegram_webhook_secret="secret-1",
+    )
+    store = FilesystemStore(settings.runs_dir)
+
+    monkeypatch.setattr(app_module, "_settings", settings)
+    monkeypatch.setattr(app_module, "_store", store)
+    monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "TelegramGateway", FakeTelegramGateway)
+
+    client = TestClient(app_module.app)
+
+    bad = client.post("/telegram/webhook", json={"message": {"text": "/help"}}, headers={})
+    assert bad.status_code == 401
+
+    ok = client.post(
+        "/telegram/webhook",
+        json={"message": {"text": "/help"}},
+        headers={"x-telegram-bot-api-secret-token": "secret-1"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["handled"] is True
+
+    poll = client.post("/telegram/poll?limit=5")
+    assert poll.status_code == 200
+    assert poll.json()["handled"] == 1
+    assert poll.json()["limit"] == 5

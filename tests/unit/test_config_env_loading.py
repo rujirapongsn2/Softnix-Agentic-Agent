@@ -149,3 +149,34 @@ def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.memory_inferred_min_confidence == 0.9
     assert settings.memory_pending_alert_threshold == 7
     assert settings.memory_admin_key == "mem-admin"
+
+
+def test_telegram_config_from_env(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "SOFTNIX_TELEGRAM_ENABLED=true\n"
+        "SOFTNIX_TELEGRAM_MODE=webhook\n"
+        "SOFTNIX_TELEGRAM_BOT_TOKEN=telegram-token\n"
+        "SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS=1001,2002\n"
+        "SOFTNIX_TELEGRAM_WEBHOOK_SECRET=secret-x\n"
+        "SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC=2.5\n"
+        "SOFTNIX_TELEGRAM_MAX_TASK_CHARS=1600\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_MODE", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_MAX_TASK_CHARS", raising=False)
+
+    settings = load_settings()
+    assert settings.telegram_enabled is True
+    assert settings.telegram_mode == "webhook"
+    assert settings.telegram_bot_token == "telegram-token"
+    assert settings.telegram_allowed_chat_ids == ["1001", "2002"]
+    assert settings.telegram_webhook_secret == "secret-x"
+    assert settings.telegram_poll_interval_sec == 2.5
+    assert settings.telegram_max_task_chars == 1600

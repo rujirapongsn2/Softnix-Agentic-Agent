@@ -101,6 +101,13 @@ pip install -e '.[dev]'
 - `SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE` ค่าขั้นต่ำ (0-1) สำหรับ staging inferred memory
 - `SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD` จำนวน pending ขั้นต่ำที่จะเริ่ม log alert backlog
 - `SOFTNIX_MEMORY_ADMIN_KEY` คีย์สำหรับ admin-only memory endpoints (เช่น policy reload)
+- `SOFTNIX_TELEGRAM_ENABLED` เปิด/ปิด Telegram Gateway (`true`/`false`)
+- `SOFTNIX_TELEGRAM_MODE` โหมด gateway (`polling` หรือ `webhook`)
+- `SOFTNIX_TELEGRAM_BOT_TOKEN` bot token จาก Telegram
+- `SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS` รายการ chat id ที่อนุญาต (comma-separated)
+- `SOFTNIX_TELEGRAM_WEBHOOK_SECRET` secret token สำหรับ verify webhook header
+- `SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC` polling interval (ใช้กับ worker/poll mode)
+- `SOFTNIX_TELEGRAM_MAX_TASK_CHARS` จำกัดความยาว task ผ่าน `/run`
 
 ## การใช้งาน CLI
 
@@ -149,10 +156,13 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `GET /artifacts/{id}/{path}` ดาวน์โหลด artifact
 - `GET /health` ตรวจสถานะ provider connectivity/config
 - `GET /system/config` อ่าน effective runtime config (safe fields)
+- `POST /telegram/webhook` รับ Telegram webhook update (public endpoint, แนะนำให้เปิด secret verify)
+- `POST /telegram/poll` ดึง updates แบบ manual 1 รอบ (สำหรับ dev/polling)
 
 เมื่อเปิด `SOFTNIX_API_KEY`:
 - ทุก request ที่เข้าถึง API หลักต้องส่ง header `x-api-key: <your-key>`
 - CORS preflight (`OPTIONS`) ยังทำงานได้ปกติสำหรับ origin ที่ allow ไว้
+- `POST /telegram/webhook` ยังเป็น public path เพื่อรองรับ Telegram callback โดยให้ป้องกันด้วย `SOFTNIX_TELEGRAM_WEBHOOK_SECRET`
 
 ## Web UI (ChatGPT-like)
 
@@ -201,6 +211,69 @@ VITE_SOFTNIX_MEMORY_ADMIN_KEY=
 
 ข้อจำกัดปัจจุบันของ Web UI:
 - ยังไม่มีหน้าจัดการ policy admin (reload ยังเรียกผ่าน API)
+
+## Telegram Setup (MVP)
+
+### 1) สร้าง Bot และรับ Token
+
+1. เปิด Telegram แล้วคุยกับ `@BotFather`
+2. ใช้คำสั่ง `/newbot` แล้วตั้งชื่อ bot
+3. คัดลอก bot token ที่ได้รับมาเก็บใน `.env` เป็น `SOFTNIX_TELEGRAM_BOT_TOKEN`
+
+### 2) หา Chat ID ที่อนุญาต
+
+1. ส่งข้อความหา bot ของคุณสัก 1 ข้อความ
+2. เรียก API:
+
+```bash
+curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates"
+```
+
+3. ดูค่า `message.chat.id` แล้วใส่ใน `.env` เป็น `SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS`
+
+### 3) ตั้งค่า `.env`
+
+```bash
+SOFTNIX_TELEGRAM_ENABLED=true
+SOFTNIX_TELEGRAM_MODE=webhook
+SOFTNIX_TELEGRAM_BOT_TOKEN=<YOUR_BOT_TOKEN>
+SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS=123456789
+SOFTNIX_TELEGRAM_WEBHOOK_SECRET=<RANDOM_SECRET>
+SOFTNIX_TELEGRAM_MAX_TASK_CHARS=2000
+```
+
+ถ้าใช้หลาย chat id ให้คั่นด้วย comma:
+`SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS=123456789,-1001122334455`
+
+### 4) เปิดใช้งานแบบ Webhook
+
+1. เปิด backend ให้เข้าจากภายนอกได้ (ผ่าน public domain/HTTPS หรือ reverse proxy)
+2. ตั้ง Telegram webhook:
+
+```bash
+curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://<YOUR_PUBLIC_HOST>/telegram/webhook","secret_token":"<RANDOM_SECRET>"}'
+```
+
+3. ทดสอบส่งคำสั่งใน Telegram:
+- `/help`
+- `/run สรุปเว็บไซต์ https://www.softnix.co.th/softnix-logger/`
+- `/status <run_id>`
+
+### 5) โหมด Polling (Dev)
+
+ถ้าไม่เปิด webhook สามารถใช้ polling แบบ manual ได้:
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8787/telegram/poll?limit=20" \
+  -H "x-api-key: <SOFTNIX_API_KEY>"
+```
+
+หมายเหตุ:
+- endpoint `/telegram/webhook` เป็น public path เพื่อรองรับ Telegram callback
+- ให้ตั้ง `SOFTNIX_TELEGRAM_WEBHOOK_SECRET` เสมอใน production
+- ถ้าตั้ง `SOFTNIX_API_KEY` แล้ว endpoint อื่นยังต้องส่ง `x-api-key` ตามปกติ
 
 ## Deployment Config
 

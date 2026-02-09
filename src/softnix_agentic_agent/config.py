@@ -51,6 +51,13 @@ class Settings:
     memory_inferred_min_confidence: float = 0.75
     memory_pending_alert_threshold: int = 10
     memory_admin_key: str | None = None
+    telegram_enabled: bool = False
+    telegram_mode: str = "polling"
+    telegram_bot_token: str | None = None
+    telegram_allowed_chat_ids: list[str] = None  # type: ignore[assignment]
+    telegram_webhook_secret: str | None = None
+    telegram_poll_interval_sec: float = 1.0
+    telegram_max_task_chars: int = 2000
 
     def __post_init__(self) -> None:
         if self.safe_commands is None:
@@ -69,6 +76,8 @@ class Settings:
             self.exec_container_image_ml = self.exec_container_image
         if not self.exec_container_image_qa:
             self.exec_container_image_qa = self.exec_container_image
+        if self.telegram_allowed_chat_ids is None:
+            self.telegram_allowed_chat_ids = []
 
 
 def load_settings() -> Settings:
@@ -151,6 +160,13 @@ def load_settings() -> Settings:
         memory_inferred_min_confidence=float(os.getenv("SOFTNIX_MEMORY_INFERRED_MIN_CONFIDENCE", "0.75")),
         memory_pending_alert_threshold=int(os.getenv("SOFTNIX_MEMORY_PENDING_ALERT_THRESHOLD", "10")),
         memory_admin_key=os.getenv("SOFTNIX_MEMORY_ADMIN_KEY"),
+        telegram_enabled=os.getenv("SOFTNIX_TELEGRAM_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+        telegram_mode=os.getenv("SOFTNIX_TELEGRAM_MODE", "polling"),
+        telegram_bot_token=os.getenv("SOFTNIX_TELEGRAM_BOT_TOKEN"),
+        telegram_allowed_chat_ids=_parse_csv(os.getenv("SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS", "")),
+        telegram_webhook_secret=os.getenv("SOFTNIX_TELEGRAM_WEBHOOK_SECRET"),
+        telegram_poll_interval_sec=float(os.getenv("SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC", "1.0")),
+        telegram_max_task_chars=int(os.getenv("SOFTNIX_TELEGRAM_MAX_TASK_CHARS", "2000")),
     )
 
 

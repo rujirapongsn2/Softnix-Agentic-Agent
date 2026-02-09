@@ -2,7 +2,7 @@
 
 เอกสารนี้สรุปแผนงานถัดไป โดยเรียงตามลำดับความสำคัญ (สูง -> ต่ำ)
 
-## สถานะล่าสุด (อัปเดต 2026-02-08)
+## สถานะล่าสุด (อัปเดต 2026-02-09)
 
 ### เสร็จแล้ว
 
@@ -49,6 +49,33 @@
   - เพิ่ม prebuilt image profile strategy (`auto|base|web|data`) และ mapping image ตาม profile
   - ขยาย image profile catalog (`auto|base|web|data|scraping|ml|qa`)
   - เพิ่ม Run Diagnostics panel ใน Web UI สำหรับ runtime selection + no-progress trace
+  - เพิ่ม objective validation แบบ `python_import` (ตรวจว่าไฟล์ Python import module ที่ task ต้องการจริง)
+  - เพิ่ม auto-infer library requirement จาก task (`numpy`/`pandas`/`scipy`) เพื่อกันงาน completed หลอก
+  - ปิดช่องโหว่ auto-complete: หากมี action ใด fail ใน iteration ปัจจุบัน จะไม่ auto-complete
+  - ปรับ runtime profile auto-selection ให้ `data` มี priority สูงกว่า `web` เมื่อ task ระบุ data libs
+  - เพิ่ม prebuilt runtime images สำหรับ `data/ml` และ one-click build script:
+    - `deploy/docker/runtime/Dockerfile.data`
+    - `deploy/docker/runtime/Dockerfile.ml`
+    - `scripts/build_runtime_images.sh`
+
+4. Telegram Gateway MVP (Phase 1 - baseline started)
+- ส่งมอบแล้ว:
+  - เพิ่ม integration modules:
+    - `src/softnix_agentic_agent/integrations/telegram_parser.py`
+    - `src/softnix_agentic_agent/integrations/telegram_templates.py`
+    - `src/softnix_agentic_agent/integrations/telegram_client.py`
+    - `src/softnix_agentic_agent/integrations/telegram_gateway.py`
+  - เพิ่ม API endpoints:
+    - `POST /telegram/webhook`
+    - `POST /telegram/poll`
+  - รองรับ command พื้นฐาน:
+    - `/run <task>`
+    - `/status <run_id>`
+    - `/cancel <run_id>`
+    - `/resume <run_id>`
+    - `/pending <run_id>`
+    - `/help`
+  - เพิ่ม config/env รองรับ Telegram Gateway และ system config summary
 
 ## P0 (ต้องทำก่อน)
 
@@ -67,16 +94,21 @@
       - เพิ่ม runtime abstraction `host|container` และ container sandbox baseline (docker run + cpu/memory/pids/network limits)
       - เพิ่ม container lifecycle `per_run` (run-scoped persistent container + docker exec + shutdown เมื่อ run จบ)
       - เพิ่ม structured command execution (`run_safe_command: command+args+stdout/stderr file`) รองรับงานอัตโนมัติที่ซับซ้อนขึ้น
+      - เพิ่ม prebuilt image สำหรับ `data/ml` เพื่อให้ dependency สำคัญพร้อมใช้ (เช่น `numpy`)
     - แผนถัดไป:
       - ทำ benchmark เปรียบเทียบ profile/image แต่ละแบบ (duration/success rate/cost)
+      - เพิ่ม cold-start/warm-start metrics สำหรับ `per_run` เพื่อตัดสินใจ optimize lifecycle
   - นิยาม action กลางสำหรับวงจร `generate -> run -> validate -> refine`
-    - ความคืบหน้า: เพิ่ม objective validation baseline ใน loop (ตรวจเงื่อนไขก่อนยอม `done=true`)
+    - ความคืบหน้า: เพิ่ม objective validation baseline + `python_import` checks + inferred library constraints
   - เพิ่ม workspace governance (input/working/output zones + artifact snapshot)
-    - ความคืบหน้า: มี artifact snapshot baseline แล้ว แต่ยังต้องลด noise (ไม่ snapshot ไฟล์เดิมที่ไม่เกี่ยวกับ task)
+    - ความคืบหน้า: มี artifact snapshot baseline แล้ว และลด noise จาก `list_dir` output แล้ว
   - เพิ่ม safety policy สำหรับคำสั่งอิสระ (allow/deny + approval gate)
   - เพิ่ม structured logs/traces สำหรับแผน โค้ด คำสั่ง และผลลัพธ์ต่อ iteration
   - เพิ่ม objective validation checks และ stop conditions แบบ no-progress detection
-    - ความคืบหน้า: มี objective validation baseline แล้ว แต่ยังต้องเพิ่ม no-progress detector เพื่อกันวนรอบจน `max_iters`
+    - ความคืบหน้า: มี objective validation + no-progress detector แล้ว
+    - แผนถัดไป:
+      - เพิ่ม semantic success criteria (เช่น command exit expectations, artifact freshness per iteration)
+      - เพิ่ม objective contract จาก task parser ให้เข้มขึ้นสำหรับ task เชิงโปรแกรม
 - ผลลัพธ์: Agent ทำงาน data/code transformation แบบ end-to-end ได้ด้วยโค้ดที่สร้างเองอย่างปลอดภัยและตรวจสอบย้อนหลังได้
 
 ## P1 (ทำต่อหลัง P0)
@@ -88,19 +120,11 @@
   - ส่งความคืบหน้าและผลลัพธ์กลับไปที่ chat เดิม
   - รองรับการควบคุม run ขั้นพื้นฐาน (`start/status/cancel/resume`)
 - งานหลัก (Phase 1: MVP):
-  - สร้าง module `telegram_gateway` (adapter ระหว่าง Telegram Bot API กับระบบ run)
-  - ออกแบบ command contract เช่น:
-    - `/run <task>`
-    - `/status <run_id>`
-    - `/cancel <run_id>`
-    - `/resume <run_id>`
-    - `/pending <run_id>` (memory pending)
-  - เชื่อมกับ API ภายในที่มีอยู่ (`/runs`, `/runs/{id}`, `/runs/{id}/events`, `/runs/{id}/memory/pending`)
-  - ส่งผลลัพธ์กลับ Telegram เป็นข้อความสรุป + ลิงก์/ไฟล์ artifact ที่สำคัญ
-  - เพิ่ม env config:
-    - `SOFTNIX_TELEGRAM_BOT_TOKEN`
-    - `SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS`
-    - `SOFTNIX_TELEGRAM_MODE` (`webhook|polling`)
+  - [x] สร้าง module `telegram_gateway` (adapter ระหว่าง Telegram Bot API กับระบบ run)
+  - [x] รองรับ command contract พื้นฐาน (`/run`, `/status`, `/cancel`, `/resume`, `/pending`, `/help`)
+  - [x] เพิ่ม env config หลัก (`BOT_TOKEN`, `ALLOWED_CHAT_IDS`, `MODE`, `WEBHOOK_SECRET`, limits)
+  - [ ] เพิ่ม artifact delivery (`sendDocument`) + ข้อความสรุปผลท้าย run
+  - [ ] เพิ่ม command latency/error metrics สำหรับ Telegram flows
 - งานหลัก (Phase 2: Hardening):
   - access control ต่อ chat/user + anti-abuse (rate limit, cooldown, retry)
   - idempotency และ dedup สำหรับ message update ซ้ำ
@@ -155,6 +179,19 @@
   - smoke tests (dev/staging/prod)
   - operational runbook
 - ผลลัพธ์: release ซ้ำได้และลด human error
+
+## ลำดับแนะนำถัดไป (Next 3)
+
+1. Execution benchmark + observability hardening
+- วัดผล `per_action` vs `per_run` และ image profiles (`base/web/data/ml`) ด้วย task ชุดมาตรฐาน
+- เก็บ metrics: success rate, median duration, iteration count, dependency install time
+
+2. Objective contract generator
+- แปลง task เป็น validation contract อัตโนมัติให้เข้มขึ้น (ไฟล์, เนื้อหา, import/module, freshness)
+- ลดเคส completed หลอกในงานเขียน/รันโค้ดหลายขั้นตอน
+
+3. Telegram Gateway MVP (เริ่ม P1 ที่มี impact สูง)
+- เปิดช่องทางสั่งงานจริงนอก Web UI พร้อม status/cancel/resume/pending flows
 
 ## Definition of Done (ทุกหัวข้อ)
 
