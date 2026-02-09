@@ -31,6 +31,25 @@
     - `POST /admin/memory/policy/reload` (admin key)
   - backlog alert และ compact failure audit/event logging
 
+3. Execution reliability + Timeline UX clarity
+- ส่งมอบแล้ว:
+  - ปรับสถานะ run เมื่อจบด้วย `max_iters` ให้เป็น `failed` (ไม่แสดงเป็น `completed`)
+  - เพิ่ม Final Summary Card ใน Web UI เพื่อสรุปผล run แบบอ่านง่าย (`Success/Failed/Canceled`)
+  - ปรับข้อความ timeline จาก event ดิบเป็นข้อความเชิงความหมาย (human-readable)
+  - รองรับ `python3 -> python` alias ทั้ง executor/loop/planner guardrail
+  - ขยาย `run_safe_command` ให้รองรับ structured params:
+    - `args`
+    - `stdout_path` / `stderr_path`
+    - legacy compatibility: `redirect_output` / `output_file`
+  - เพิ่ม/ปรับ tests สำหรับ structured command execution และ status semantics
+  - เพิ่ม no-progress detector (หยุด run เมื่อวนซ้ำไม่คืบหน้า ด้วย `stop_reason=no_progress`)
+  - เพิ่ม no-progress telemetry (`signature` + `actions`) เพื่อช่วย debug สาเหตุลูปซ้ำ
+  - ลด artifact noise: ไม่ snapshot ไฟล์จาก `list_dir` output โดยตรง
+  - เพิ่ม container pip dependency cache ข้าม run ผ่าน `SOFTNIX_EXEC_CONTAINER_CACHE_DIR`
+  - เพิ่ม prebuilt image profile strategy (`auto|base|web|data`) และ mapping image ตาม profile
+  - ขยาย image profile catalog (`auto|base|web|data|scraping|ml|qa`)
+  - เพิ่ม Run Diagnostics panel ใน Web UI สำหรับ runtime selection + no-progress trace
+
 ## P0 (ต้องทำก่อน)
 
 1. Core Memory hardening (Phase 3B)
@@ -47,15 +66,17 @@
     - ความคืบหน้า:
       - เพิ่ม runtime abstraction `host|container` และ container sandbox baseline (docker run + cpu/memory/pids/network limits)
       - เพิ่ม container lifecycle `per_run` (run-scoped persistent container + docker exec + shutdown เมื่อ run จบ)
+      - เพิ่ม structured command execution (`run_safe_command: command+args+stdout/stderr file`) รองรับงานอัตโนมัติที่ซับซ้อนขึ้น
     - แผนถัดไป:
-      - prebuilt image strategy ต่อ skill set
-      - dependency cache strategy ระหว่าง runs
+      - ทำ benchmark เปรียบเทียบ profile/image แต่ละแบบ (duration/success rate/cost)
   - นิยาม action กลางสำหรับวงจร `generate -> run -> validate -> refine`
     - ความคืบหน้า: เพิ่ม objective validation baseline ใน loop (ตรวจเงื่อนไขก่อนยอม `done=true`)
   - เพิ่ม workspace governance (input/working/output zones + artifact snapshot)
+    - ความคืบหน้า: มี artifact snapshot baseline แล้ว แต่ยังต้องลด noise (ไม่ snapshot ไฟล์เดิมที่ไม่เกี่ยวกับ task)
   - เพิ่ม safety policy สำหรับคำสั่งอิสระ (allow/deny + approval gate)
   - เพิ่ม structured logs/traces สำหรับแผน โค้ด คำสั่ง และผลลัพธ์ต่อ iteration
   - เพิ่ม objective validation checks และ stop conditions แบบ no-progress detection
+    - ความคืบหน้า: มี objective validation baseline แล้ว แต่ยังต้องเพิ่ม no-progress detector เพื่อกันวนรอบจน `max_iters`
 - ผลลัพธ์: Agent ทำงาน data/code transformation แบบ end-to-end ได้ด้วยโค้ดที่สร้างเองอย่างปลอดภัยและตรวจสอบย้อนหลังได้
 
 ## P1 (ทำต่อหลัง P0)

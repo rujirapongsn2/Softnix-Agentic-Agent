@@ -20,6 +20,15 @@ type TimelineItem =
   | { id: string; kind: "iteration"; item: Record<string, unknown> }
   | { id: string; kind: "state"; state: RunState };
 
+type RunDiagnostics = {
+  runtimeProfile?: string;
+  runtimeImage?: string;
+  noProgressSignature?: string;
+  noProgressActions?: string;
+  lastIteration?: number;
+  lastIterationDone?: boolean;
+};
+
 function ProcessingIndicator({ text = "Agent is processing" }: { text?: string }) {
   return (
     <motion.div
@@ -77,6 +86,14 @@ function prettifyEventMessage(message: string): string {
   if (message === "objective validation passed") return "Validation passed";
   if (message === "stopped: max_iters reached") return "Run failed: reached max iterations before objective completed";
   if (message === "stopped by cancel request") return "Run canceled by user request";
+  const noProgress = message.match(/^stopped: no_progress detected repeated=(\d+) signature=([a-f0-9]+) actions=(.+)$/);
+  if (noProgress) {
+    return `Run failed: no progress detected (${noProgress[1]} repeats, sig=${noProgress[2]}, actions=${noProgress[3]})`;
+  }
+  const runtime = message.match(/^container runtime profile=([a-z]+) image=(.+)$/);
+  if (runtime) {
+    return `Container runtime selected: profile=${runtime[1]}, image=${runtime[2]}`;
+  }
 
   const metrics = message.match(/^memory metrics pending_count=(\d+)$/);
   if (metrics) return `Memory pending count: ${metrics[1]}`;
@@ -88,6 +105,7 @@ function renderStopReason(stopReason?: string | null): string {
   if (!stopReason) return "unknown";
   if (stopReason === "completed") return "objective completed";
   if (stopReason === "max_iters") return "max iterations reached";
+  if (stopReason === "no_progress") return "no progress detected";
   if (stopReason === "canceled") return "canceled";
   if (stopReason === "error") return "runtime error";
   if (stopReason === "interrupted") return "interrupted";
@@ -106,6 +124,31 @@ function runOutcome(run: RunState): { label: string; variant: "default" | "muted
   return { label: run.status, variant: "muted" };
 }
 
+function extractDiagnostics(items: TimelineItem[]): RunDiagnostics {
+  const diagnostics: RunDiagnostics = {};
+  for (const item of items) {
+    if (item.kind !== "event") continue;
+    const runtime = item.text.match(/^Container runtime selected: profile=([^,]+), image=(.+)$/);
+    if (runtime) {
+      diagnostics.runtimeProfile = runtime[1];
+      diagnostics.runtimeImage = runtime[2];
+      continue;
+    }
+    const noProgress = item.text.match(/^Run failed: no progress detected \(\d+ repeats, sig=([a-f0-9]+), actions=(.+)\)$/);
+    if (noProgress) {
+      diagnostics.noProgressSignature = noProgress[1];
+      diagnostics.noProgressActions = noProgress[2];
+      continue;
+    }
+    const iter = item.text.match(/^Iteration (\d+) finished \((done|continue)\)$/);
+    if (iter) {
+      diagnostics.lastIteration = Number(iter[1]);
+      diagnostics.lastIterationDone = iter[2] === "done";
+    }
+  }
+  return diagnostics;
+}
+
 function finalSummary(run: RunState | null): { title: string; detail: string; tone: "ok" | "warn" | "neutral" } | null {
   if (!run || run.status === "running") return null;
 
@@ -121,6 +164,14 @@ function finalSummary(run: RunState | null): { title: string; detail: string; to
     return {
       title: "Final Result: Failed",
       detail: `Reached max iterations (${run.max_iters}) before completing objective.`,
+      tone: "warn"
+    };
+  }
+
+  if (run.status === "failed" && run.stop_reason === "no_progress") {
+    return {
+      title: "Final Result: Failed",
+      detail: "Stopped because no progress was detected across repeated iterations.",
       tone: "warn"
     };
   }
@@ -181,6 +232,7 @@ export function App() {
 
   const selectedRun = useMemo(() => runs.find((r) => r.run_id === selectedRunId) ?? null, [runs, selectedRunId]);
   const selectedRunSummary = useMemo(() => finalSummary(selectedRun), [selectedRun]);
+  const selectedRunDiagnostics = useMemo(() => extractDiagnostics(timeline), [timeline]);
   const canReloadPolicy = apiClient.hasMemoryAdminKey();
   const isSelectedRunRunning = selectedRun?.status === "running" || pending;
   const visibleArtifacts = useMemo(() => {
@@ -666,6 +718,30 @@ export function App() {
               >
                 <div className="font-semibold">{selectedRunSummary.title}</div>
                 <div className="text-xs">{selectedRunSummary.detail}</div>
+              </div>
+            ) : null}
+            {selectedRun ? (
+              <div className="mb-3 rounded-lg border border-border bg-secondary/50 px-3 py-2 text-xs">
+                <div className="mb-1 font-semibold">Run Diagnostics</div>
+                <div className="text-muted-foreground">run_id: {selectedRun.run_id}</div>
+                <div className="text-muted-foreground">
+                  status: {runOutcome(selectedRun).label} / stop_reason: {renderStopReason(selectedRun.stop_reason)}
+                </div>
+                {selectedRunDiagnostics.runtimeProfile && selectedRunDiagnostics.runtimeImage ? (
+                  <div className="text-muted-foreground">
+                    runtime: {selectedRunDiagnostics.runtimeProfile} ({selectedRunDiagnostics.runtimeImage})
+                  </div>
+                ) : null}
+                {typeof selectedRunDiagnostics.lastIteration === "number" ? (
+                  <div className="text-muted-foreground">
+                    last iteration: {selectedRunDiagnostics.lastIteration} ({selectedRunDiagnostics.lastIterationDone ? "done" : "continue"})
+                  </div>
+                ) : null}
+                {selectedRunDiagnostics.noProgressSignature ? (
+                  <div className="text-red-700">
+                    no-progress: sig={selectedRunDiagnostics.noProgressSignature}, actions={selectedRunDiagnostics.noProgressActions}
+                  </div>
+                ) : null}
               </div>
             ) : null}
             <ScrollArea ref={timelineViewportRef} className="h-[76vh] space-y-3 pr-2">

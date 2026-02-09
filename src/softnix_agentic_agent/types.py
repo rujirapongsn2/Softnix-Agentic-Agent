@@ -13,6 +13,7 @@ def utc_now_iso() -> str:
 class StopReason(str, Enum):
     COMPLETED = "completed"
     MAX_ITERS = "max_iters"
+    NO_PROGRESS = "no_progress"
     INTERRUPTED = "interrupted"
     ERROR = "error"
     CANCELED = "canceled"

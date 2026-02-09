@@ -280,6 +280,90 @@ def test_loop_objective_validation_accepts_valid_file_exists_check(tmp_path: Pat
     assert (tmp_path / "result.txt").exists() is True
 
 
+def test_loop_objective_validation_blocks_done_when_task_requires_numpy_but_script_missing_import(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "calculate_stats.py",
+                            "content": "values=[1,2,3]\nprint(sum(values)/len(values))\n",
+                        },
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "stats.txt", "content": "ok"},
+                    },
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างสคริปต์ Python ชื่อ calculate_stats.py ใช้ numpy แล้วบันทึกลง stats.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "module not imported in calculate_stats.py: numpy" in state.last_output
+
+
+def test_loop_objective_validation_accepts_when_task_requires_numpy_and_script_imports_numpy(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "calculate_stats.py",
+                            "content": "import numpy as np\nprint(np.mean([1,2,3]))\n",
+                        },
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "stats.txt", "content": "ok"},
+                    },
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างสคริปต์ Python ชื่อ calculate_stats.py ใช้ numpy แล้วบันทึกลง stats.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert (tmp_path / "stats.txt").exists() is True
+
+
 def test_loop_logs_selected_skills_in_events(tmp_path: Path) -> None:
     skill_dir = tmp_path / "web-summary"
     skill_dir.mkdir(parents=True)
@@ -294,7 +378,19 @@ Use this skill when task contains URL and asks summary.
         encoding="utf-8",
     )
 
-    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "stats.txt", "content": "ok"},
+                    }
+                ],
+            }
+        ]
+    )
     planner = Planner(provider=provider, model="m")
     settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
     store = FilesystemStore(settings.runs_dir)
@@ -397,3 +493,383 @@ def test_loop_run_shell_command_with_structured_args_can_write_result_file(tmp_p
     assert state.stop_reason == StopReason.COMPLETED
     assert (tmp_path / "result.txt").exists() is True
     assert "result.txt" in store.list_artifacts(state.run_id)
+
+
+def test_loop_stops_with_no_progress_before_max_iters(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [{"name": "list_dir", "params": {"path": "."}}],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        no_progress_repeat_threshold=3,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="demo no progress",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=10,
+    )
+
+    assert state.stop_reason == StopReason.NO_PROGRESS
+    assert state.status == RunStatus.FAILED
+    assert state.iteration < 10
+    events = store.read_events(state.run_id)
+    assert any("stopped: no_progress detected" in e and "signature=" in e for e in events)
+
+
+def test_loop_list_dir_output_does_not_snapshot_unrelated_existing_files(tmp_path: Path) -> None:
+    (tmp_path / "old.txt").write_text("old", encoding="utf-8")
+
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [{"name": "list_dir", "params": {"path": "."}}],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="just inspect directory",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert "old.txt" not in store.list_artifacts(state.run_id)
+
+
+def test_loop_auto_completes_when_inferred_output_checks_pass_even_if_done_false(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "result.txt", "content": "ok"},
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียนผลลัพธ์ลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=3,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.status == RunStatus.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("objective auto-completed from inferred validations" in e for e in events)
+
+
+def test_loop_auto_complete_does_not_complete_when_current_iteration_has_failed_action(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "result.txt", "content": "ok"},
+                    },
+                    {
+                        "name": "run_python_code",
+                        "params": {"code": "raise RuntimeError('boom')"},
+                    },
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียนผลลัพธ์ลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    events = store.read_events(state.run_id)
+    assert not any("objective auto-completed from inferred validations" in e for e in events)
+
+
+def test_loop_auto_complete_pytest_requires_pytest_text_in_result(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "test_math.py", "content": "def test_x():\n    assert True\n"},
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "result.txt", "content": "all tests passed"},
+                    },
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างไฟล์ test_math.py แล้วรัน pytest และบันทึก stdout ลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=2,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+
+
+def test_loop_auto_complete_does_not_use_stale_inferred_output_from_previous_run(tmp_path: Path) -> None:
+    (tmp_path / "result.txt").write_text("stale pytest output", encoding="utf-8")
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "test_math.py", "content": "def test_x():\n    assert True\n"},
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างไฟล์ test_math.py แล้วรัน pytest พร้อมบันทึก stdout ลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=2,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    events = store.read_events(state.run_id)
+    assert not any("objective auto-completed from inferred validations" in e for e in events)
+
+
+def test_loop_logs_container_runtime_profile_from_auto_selection(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "web-summary"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website content
+---
+
+Use this skill when task contains URL and asks summary.
+""",
+        encoding="utf-8",
+    )
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "stats.txt", "content": "ok"},
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        exec_runtime="container",
+        exec_container_image_profile="auto",
+        exec_container_image_base="img-base",
+        exec_container_image_web="img-web",
+        exec_container_image_data="img-data",
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยสรุปจาก https://example.com",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("container runtime profile=web image=img-web" in e for e in events)
+
+
+def test_loop_logs_container_runtime_profile_auto_data_takes_priority_over_web(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "web-summary"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website content
+---
+""",
+        encoding="utf-8",
+    )
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "stats.txt", "content": "ok"},
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        exec_runtime="container",
+        exec_container_image_profile="auto",
+        exec_container_image_base="img-base",
+        exec_container_image_web="img-web",
+        exec_container_image_data="img-data",
+        exec_container_image_scraping="img-scraping",
+        exec_container_image_ml="img-ml",
+        exec_container_image_qa="img-qa",
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ดึงข้อมูลจาก https://example.com และใช้ numpy คำนวณสถิติ บันทึกลง stats.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("container runtime profile=data image=img-data" in e for e in events)
+
+
+def test_loop_logs_container_runtime_profile_auto_scraping(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        exec_runtime="container",
+        exec_container_image_profile="auto",
+        exec_container_image_base="img-base",
+        exec_container_image_web="img-web",
+        exec_container_image_data="img-data",
+        exec_container_image_scraping="img-scraping",
+        exec_container_image_ml="img-ml",
+        exec_container_image_qa="img-qa",
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="scrape website with playwright and summarize",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("container runtime profile=scraping image=img-scraping" in e for e in events)
+
+
+def test_loop_logs_container_runtime_profile_auto_qa(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        exec_runtime="container",
+        exec_container_image_profile="auto",
+        exec_container_image_base="img-base",
+        exec_container_image_web="img-web",
+        exec_container_image_data="img-data",
+        exec_container_image_scraping="img-scraping",
+        exec_container_image_ml="img-ml",
+        exec_container_image_qa="img-qa",
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="run unit test with pytest and generate coverage report",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("container runtime profile=qa image=img-qa" in e for e in events)

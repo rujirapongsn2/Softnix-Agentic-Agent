@@ -56,11 +56,21 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_EXEC_RUNTIME=container\n"
         "SOFTNIX_EXEC_CONTAINER_LIFECYCLE=per_run\n"
         "SOFTNIX_EXEC_CONTAINER_IMAGE=python:3.12-slim\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE_PROFILE=web\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE_BASE=python:3.12-base\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE_WEB=python:3.12-web\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE_DATA=python:3.12-data\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE_SCRAPING=python:3.12-scraping\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE_ML=python:3.12-ml\n"
+        "SOFTNIX_EXEC_CONTAINER_IMAGE_QA=python:3.12-qa\n"
         "SOFTNIX_EXEC_CONTAINER_NETWORK=none\n"
         "SOFTNIX_EXEC_CONTAINER_CPUS=1.5\n"
         "SOFTNIX_EXEC_CONTAINER_MEMORY=768m\n"
         "SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=300\n"
+        "SOFTNIX_EXEC_CONTAINER_CACHE_DIR=.softnix/test-cache\n"
+        "SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=false\n"
         "SOFTNIX_MAX_ACTION_OUTPUT_CHARS=5000\n"
+        "SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD=4\n"
         "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n",
         encoding="utf-8",
     )
@@ -70,11 +80,21 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_EXEC_RUNTIME", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_LIFECYCLE", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE_PROFILE", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE_BASE", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE_WEB", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE_DATA", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE_SCRAPING", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE_ML", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_IMAGE_QA", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_NETWORK", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_CPUS", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_MEMORY", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_CACHE_DIR", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED", raising=False)
     monkeypatch.delenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", raising=False)
+    monkeypatch.delenv("SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
 
     settings = load_settings()
@@ -82,11 +102,21 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.exec_runtime == "container"
     assert settings.exec_container_lifecycle == "per_run"
     assert settings.exec_container_image == "python:3.12-slim"
+    assert settings.exec_container_image_profile == "web"
+    assert settings.exec_container_image_base == "python:3.12-base"
+    assert settings.exec_container_image_web == "python:3.12-web"
+    assert settings.exec_container_image_data == "python:3.12-data"
+    assert settings.exec_container_image_scraping == "python:3.12-scraping"
+    assert settings.exec_container_image_ml == "python:3.12-ml"
+    assert settings.exec_container_image_qa == "python:3.12-qa"
     assert settings.exec_container_network == "none"
     assert settings.exec_container_cpus == 1.5
     assert settings.exec_container_memory == "768m"
     assert settings.exec_container_pids_limit == 300
+    assert str(settings.exec_container_cache_dir) == ".softnix/test-cache"
+    assert settings.exec_container_pip_cache_enabled is False
     assert settings.max_action_output_chars == 5000
+    assert settings.no_progress_repeat_threshold == 4
     assert settings.web_fetch_tls_verify is False
 
 

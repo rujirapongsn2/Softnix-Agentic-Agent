@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import ast
+import hashlib
+import json
 import re
 import shlex
 import uuid
@@ -76,6 +79,13 @@ class AgentLoopRunner:
 
     def _run_loop(self, state: RunState) -> RunState:
         skill_loader = SkillLoader(Path(state.skills_dir))
+        selected_for_runtime = skill_loader.select_skills(task=state.task)
+        runtime_image, runtime_profile = self._resolve_container_runtime_image(state.task, selected_for_runtime)
+        if self.settings.exec_runtime == "container":
+            self.store.log_event(
+                state.run_id,
+                f"container runtime profile={runtime_profile} image={runtime_image}",
+            )
         memory_store = MarkdownMemoryStore(
             workspace=Path(state.workspace),
             policy_path=self.settings.memory_policy_path,
@@ -96,15 +106,20 @@ class AgentLoopRunner:
             command_timeout_sec=self.settings.exec_timeout_sec,
             exec_runtime=self.settings.exec_runtime,
             exec_container_lifecycle=self.settings.exec_container_lifecycle,
-            exec_container_image=self.settings.exec_container_image,
+            exec_container_image=runtime_image,
             exec_container_network=self.settings.exec_container_network,
             exec_container_cpus=self.settings.exec_container_cpus,
             exec_container_memory=self.settings.exec_container_memory,
             exec_container_pids_limit=self.settings.exec_container_pids_limit,
+            exec_container_cache_dir=self.settings.exec_container_cache_dir,
+            exec_container_pip_cache_enabled=self.settings.exec_container_pip_cache_enabled,
             run_id=state.run_id,
             max_output_chars=self.settings.max_action_output_chars,
             web_fetch_tls_verify=self.settings.web_fetch_tls_verify,
         )
+        previous_iteration_signature = ""
+        repeated_iteration_count = 0
+        produced_files_in_run: set[str] = set()
 
         try:
             if state.iteration == 0:
@@ -199,7 +214,8 @@ class AgentLoopRunner:
                             "error": result.error,
                         }
                     )
-                self._snapshot_artifacts(state, actions, action_results)
+                new_artifacts = self._snapshot_artifacts(state, actions, action_results)
+                produced_files_in_run.update(new_artifacts)
 
                 memory_metrics = memory.collect_metrics(
                     pending_alert_threshold=self.settings.memory_pending_alert_threshold
@@ -277,7 +293,47 @@ class AgentLoopRunner:
                     self.store.write_state(state)
                     return state
 
+                has_failed_action = any(not bool(result.get("ok")) for result in action_results)
+                if not has_failed_action:
+                    auto_complete_report = self._evaluate_auto_complete_validations(
+                        task=state.task,
+                        workspace=Path(state.workspace),
+                        produced_files=produced_files_in_run,
+                    )
+                    if auto_complete_report.get("checks") and auto_complete_report.get("ok"):
+                        state.status = RunStatus.COMPLETED
+                        state.stop_reason = StopReason.COMPLETED
+                        state.updated_at = utc_now_iso()
+                        self.store.write_state(state)
+                        self.store.log_event(
+                            state.run_id,
+                            "objective auto-completed from inferred validations",
+                        )
+                        return state
+
                 self.store.write_state(state)
+
+                current_sig = self._build_iteration_signature(actions=actions, action_results=action_results, output=output)
+                if current_sig == previous_iteration_signature:
+                    repeated_iteration_count += 1
+                else:
+                    repeated_iteration_count = 1
+                    previous_iteration_signature = current_sig
+
+                threshold = max(2, int(self.settings.no_progress_repeat_threshold))
+                if repeated_iteration_count >= threshold:
+                    state.status = RunStatus.FAILED
+                    state.stop_reason = StopReason.NO_PROGRESS
+                    state.updated_at = utc_now_iso()
+                    self.store.write_state(state)
+                    action_names = ",".join(str(a.get("name", "")) for a in actions) or "(none)"
+                    self.store.log_event(
+                        state.run_id,
+                        "stopped: no_progress detected "
+                        f"repeated={repeated_iteration_count} "
+                        f"signature={current_sig[:12]} actions={action_names}",
+                    )
+                    return state
 
             state.status = RunStatus.FAILED
             state.stop_reason = StopReason.MAX_ITERS
@@ -303,9 +359,21 @@ class AgentLoopRunner:
         finally:
             executor.shutdown()
 
-    def _snapshot_artifacts(self, state: RunState, actions: list[dict[str, Any]], action_results: list[dict[str, Any]]) -> None:
+    def _snapshot_artifacts(
+        self,
+        state: RunState,
+        actions: list[dict[str, Any]],
+        action_results: list[dict[str, Any]],
+    ) -> set[str]:
         workspace = Path(state.workspace)
         snapshotted: set[str] = set()
+        output_extract_actions = {
+            "run_python_code",
+            "run_safe_command",
+            "run_shell_command",
+            "write_workspace_file",
+            "write_file",
+        }
         for action, result in zip(actions, action_results):
             action_name = str(action.get("name", ""))
             result_name = str(result.get("name", ""))
@@ -320,7 +388,7 @@ class AgentLoopRunner:
                 candidate_paths.append(str(raw_path))
 
             output = str(result.get("output") or "")
-            if output:
+            if output and (action_name in output_extract_actions or result_name in output_extract_actions):
                 candidate_paths.extend(self._extract_existing_file_targets_from_text(output, workspace))
 
             for raw in candidate_paths:
@@ -332,6 +400,55 @@ class AgentLoopRunner:
                     self.store.log_event(state.run_id, f"artifact saved: {rel}")
                 except Exception as exc:
                     self.store.log_event(state.run_id, f"artifact snapshot failed: {exc}")
+        return snapshotted
+
+    def _evaluate_auto_complete_validations(
+        self,
+        task: str,
+        workspace: Path,
+        produced_files: set[str],
+    ) -> dict[str, Any]:
+        inferred_paths = set(self._infer_output_files_from_task(task))
+        if not inferred_paths:
+            return {"ok": False, "failures": ["no inferred outputs"], "checks": []}
+        missing_in_run = sorted(path for path in inferred_paths if path not in produced_files)
+        if missing_in_run:
+            return {
+                "ok": False,
+                "failures": [f"inferred output not produced in this run: {p}" for p in missing_in_run],
+                "checks": [],
+            }
+        return self._evaluate_objective_validations(
+            task=task,
+            plan={"validations": []},
+            workspace=workspace,
+            produced_files=produced_files,
+        )
+
+    def _build_iteration_signature(
+        self,
+        actions: list[dict[str, Any]],
+        action_results: list[dict[str, Any]],
+        output: str,
+    ) -> str:
+        compact_results = []
+        for item in action_results:
+            compact_results.append(
+                {
+                    "name": str(item.get("name", "")),
+                    "ok": bool(item.get("ok", False)),
+                    "error": str(item.get("error", "")),
+                    "output": str(item.get("output", ""))[:500],
+                }
+            )
+
+        payload = {
+            "actions": actions,
+            "results": compact_results,
+            "output": (output or "")[:800],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _prepare_action(self, action: dict[str, Any], task: str, workspace: Path) -> dict[str, Any]:
         prepared = copy.deepcopy(action)
@@ -453,13 +570,67 @@ class AgentLoopRunner:
         }
         return aliases.get(raw, raw)
 
+    def _resolve_container_runtime_image(self, task: str, selected_skills: list[Any]) -> tuple[str, str]:
+        default_image = self.settings.exec_container_image
+        if self.settings.exec_runtime != "container":
+            return default_image, "host"
+
+        requested = (self.settings.exec_container_image_profile or "auto").strip().lower()
+        profile = requested
+        if profile not in {"auto", "base", "web", "data", "scraping", "ml", "qa"}:
+            profile = "auto"
+
+        if profile == "auto":
+            text = (task or "").lower()
+            skill_names = [str(getattr(s, "name", "")).lower() for s in selected_skills]
+            if (
+                any(tok in text for tok in {"selenium", "playwright", "beautifulsoup", "scrape", "crawler"})
+                or any(("scrap" in name or "crawl" in name) for name in skill_names)
+            ):
+                profile = "scraping"
+            elif (
+                any(tok in text for tok in {"pytorch", "tensorflow", "scikit", "sklearn", "xgboost", "train model"})
+                or any(("ml" in name or "model" in name) for name in skill_names)
+            ):
+                profile = "ml"
+            elif (
+                any(tok in text for tok in {"pytest", "unit test", "integration test", "coverage"})
+                or any(("test" in name or "qa" in name) for name in skill_names)
+            ):
+                profile = "qa"
+            elif (
+                any(tok in text for tok in {"csv", "pandas", "numpy", "dataset", "dataframe"})
+                or any("data" in name for name in skill_names)
+            ):
+                profile = "data"
+            elif (
+                "http://" in text
+                or "https://" in text
+                or "url" in text
+                or any("web" in name for name in skill_names)
+            ):
+                profile = "web"
+            else:
+                profile = "base"
+
+        images = {
+            "base": self.settings.exec_container_image_base or default_image,
+            "web": self.settings.exec_container_image_web or default_image,
+            "data": self.settings.exec_container_image_data or default_image,
+            "scraping": self.settings.exec_container_image_scraping or default_image,
+            "ml": self.settings.exec_container_image_ml or default_image,
+            "qa": self.settings.exec_container_image_qa or default_image,
+        }
+        return images.get(profile, default_image), profile
+
     def _evaluate_objective_validations(
         self,
         task: str,
         plan: dict[str, Any],
         workspace: Path,
+        produced_files: set[str] | None = None,
     ) -> dict[str, Any]:
-        checks = self._collect_validation_checks(task=task, plan=plan)
+        checks = self._collect_validation_checks(task=task, plan=plan, produced_files=produced_files)
         if not checks:
             return {"ok": True, "failures": [], "checks": []}
 
@@ -488,11 +659,28 @@ class AgentLoopRunner:
                 if needle and needle not in content:
                     failures.append(f"text not found in {path_text}: {needle}")
                 continue
+            if ctype == "python_import":
+                if not target.exists() or not target.is_file():
+                    failures.append(f"missing output file: {path_text}")
+                    continue
+                module = str(check.get("module", "")).strip()
+                if not module:
+                    failures.append(f"validation missing module for {path_text}")
+                    continue
+                content = target.read_text(encoding="utf-8")
+                if not self._python_file_imports_module(content, module):
+                    failures.append(f"module not imported in {path_text}: {module}")
+                continue
             failures.append(f"unknown validation type: {ctype}")
 
         return {"ok": len(failures) == 0, "failures": failures, "checks": checks}
 
-    def _collect_validation_checks(self, task: str, plan: dict[str, Any]) -> list[dict[str, str]]:
+    def _collect_validation_checks(
+        self,
+        task: str,
+        plan: dict[str, Any],
+        produced_files: set[str] | None = None,
+    ) -> list[dict[str, str]]:
         checks: list[dict[str, str]] = []
         raw_validations = plan.get("validations")
         if isinstance(raw_validations, list):
@@ -502,26 +690,79 @@ class AgentLoopRunner:
                 ctype = str(item.get("type", "")).strip().lower()
                 path = str(item.get("path", "")).strip()
                 contains = str(item.get("contains", ""))
-                if ctype in {"file_exists", "text_in_file"} and path:
+                module = str(item.get("module", "")).strip()
+                if ctype in {"file_exists", "text_in_file", "python_import"} and path:
                     payload = {"type": ctype, "path": path}
                     if ctype == "text_in_file":
                         payload["contains"] = contains
+                    if ctype == "python_import":
+                        payload["module"] = module
                     checks.append(payload)
 
         inferred_files = self._infer_output_files_from_task(task)
         for path in inferred_files:
             checks.append({"type": "file_exists", "path": path})
 
+        lowered_task = (task or "").lower()
+        if "pytest" in lowered_task:
+            for path in inferred_files:
+                if path.endswith("result.txt"):
+                    checks.append({"type": "text_in_file", "path": path, "contains": "pytest"})
+
+        required_modules = self._infer_required_python_modules_from_task(task)
+        if required_modules:
+            python_files = [path for path in inferred_files if path.endswith(".py")]
+            if produced_files:
+                python_files = [path for path in python_files if path in produced_files]
+            for path in python_files:
+                for module in required_modules:
+                    checks.append({"type": "python_import", "path": path, "module": module})
+
         # preserve order with dedup
         seen = set()
         uniq: list[dict[str, str]] = []
         for item in checks:
-            sig = (item.get("type", ""), item.get("path", ""), item.get("contains", ""))
+            sig = (
+                item.get("type", ""),
+                item.get("path", ""),
+                item.get("contains", ""),
+                item.get("module", ""),
+            )
             if sig in seen:
                 continue
             seen.add(sig)
             uniq.append(item)
         return uniq
+
+    def _infer_required_python_modules_from_task(self, task: str) -> list[str]:
+        lowered = (task or "").lower()
+        modules: list[str] = []
+        if "numpy" in lowered:
+            modules.append("numpy")
+        if "pandas" in lowered:
+            modules.append("pandas")
+        if "scipy" in lowered:
+            modules.append("scipy")
+        return modules
+
+    def _python_file_imports_module(self, source: str, module: str) -> bool:
+        target = (module or "").strip().lower()
+        if not target:
+            return False
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0].lower() == target:
+                        return True
+            if isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").split(".")[0].lower()
+                if mod == target:
+                    return True
+        return False
 
     def _infer_output_files_from_task(self, task: str) -> list[str]:
         text = (task or "").strip()

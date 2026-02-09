@@ -28,11 +28,21 @@ class Settings:
     exec_runtime: str = "host"
     exec_container_lifecycle: str = "per_action"
     exec_container_image: str = "python:3.11-slim"
+    exec_container_image_profile: str = "auto"
+    exec_container_image_base: str = "python:3.11-slim"
+    exec_container_image_web: str = "python:3.11-slim"
+    exec_container_image_data: str = "python:3.11-slim"
+    exec_container_image_scraping: str = "python:3.11-slim"
+    exec_container_image_ml: str = "python:3.11-slim"
+    exec_container_image_qa: str = "python:3.11-slim"
     exec_container_network: str = "none"
     exec_container_cpus: float = 1.0
     exec_container_memory: str = "512m"
     exec_container_pids_limit: int = 256
+    exec_container_cache_dir: Path = Path(".softnix/container-cache")
+    exec_container_pip_cache_enabled: bool = True
     max_action_output_chars: int = 12000
+    no_progress_repeat_threshold: int = 3
     web_fetch_tls_verify: bool = True
     memory_profile_file: str = "memory/PROFILE.md"
     memory_session_file: str = "memory/SESSION.md"
@@ -47,6 +57,18 @@ class Settings:
             self.safe_commands = ["ls", "pwd", "cat", "echo", "python", "pytest", "rm"]
         if self.cors_origins is None:
             self.cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+        if not self.exec_container_image_base:
+            self.exec_container_image_base = self.exec_container_image
+        if not self.exec_container_image_web:
+            self.exec_container_image_web = self.exec_container_image
+        if not self.exec_container_image_data:
+            self.exec_container_image_data = self.exec_container_image
+        if not self.exec_container_image_scraping:
+            self.exec_container_image_scraping = self.exec_container_image
+        if not self.exec_container_image_ml:
+            self.exec_container_image_ml = self.exec_container_image
+        if not self.exec_container_image_qa:
+            self.exec_container_image_qa = self.exec_container_image
 
 
 def load_settings() -> Settings:
@@ -86,11 +108,40 @@ def load_settings() -> Settings:
         exec_runtime=os.getenv("SOFTNIX_EXEC_RUNTIME", "host"),
         exec_container_lifecycle=os.getenv("SOFTNIX_EXEC_CONTAINER_LIFECYCLE", "per_action"),
         exec_container_image=os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        exec_container_image_profile=os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE_PROFILE", "auto"),
+        exec_container_image_base=os.getenv(
+            "SOFTNIX_EXEC_CONTAINER_IMAGE_BASE",
+            os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        ),
+        exec_container_image_web=os.getenv(
+            "SOFTNIX_EXEC_CONTAINER_IMAGE_WEB",
+            os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        ),
+        exec_container_image_data=os.getenv(
+            "SOFTNIX_EXEC_CONTAINER_IMAGE_DATA",
+            os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        ),
+        exec_container_image_scraping=os.getenv(
+            "SOFTNIX_EXEC_CONTAINER_IMAGE_SCRAPING",
+            os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        ),
+        exec_container_image_ml=os.getenv(
+            "SOFTNIX_EXEC_CONTAINER_IMAGE_ML",
+            os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        ),
+        exec_container_image_qa=os.getenv(
+            "SOFTNIX_EXEC_CONTAINER_IMAGE_QA",
+            os.getenv("SOFTNIX_EXEC_CONTAINER_IMAGE", "python:3.11-slim"),
+        ),
         exec_container_network=os.getenv("SOFTNIX_EXEC_CONTAINER_NETWORK", "none"),
         exec_container_cpus=float(os.getenv("SOFTNIX_EXEC_CONTAINER_CPUS", "1.0")),
         exec_container_memory=os.getenv("SOFTNIX_EXEC_CONTAINER_MEMORY", "512m"),
         exec_container_pids_limit=int(os.getenv("SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT", "256")),
+        exec_container_cache_dir=Path(os.getenv("SOFTNIX_EXEC_CONTAINER_CACHE_DIR", ".softnix/container-cache")),
+        exec_container_pip_cache_enabled=os.getenv("SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED", "true").lower()
+        in {"1", "true", "yes", "on"},
         max_action_output_chars=int(os.getenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", "12000")),
+        no_progress_repeat_threshold=int(os.getenv("SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD", "3")),
         web_fetch_tls_verify=os.getenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", "true").lower()
         in {"1", "true", "yes", "on"},
         memory_profile_file=os.getenv("SOFTNIX_MEMORY_PROFILE_FILE", "memory/PROFILE.md"),

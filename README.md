@@ -261,15 +261,40 @@ Action ที่รองรับในรุ่นแรก:
 SOFTNIX_EXEC_RUNTIME=container
 SOFTNIX_EXEC_CONTAINER_LIFECYCLE=per_run
 SOFTNIX_EXEC_CONTAINER_IMAGE=python:3.11-slim
+SOFTNIX_EXEC_CONTAINER_IMAGE_PROFILE=auto
+SOFTNIX_EXEC_CONTAINER_IMAGE_BASE=python:3.11-slim
+SOFTNIX_EXEC_CONTAINER_IMAGE_WEB=python:3.11-slim
+SOFTNIX_EXEC_CONTAINER_IMAGE_DATA=softnix/runtime-data:py311
+SOFTNIX_EXEC_CONTAINER_IMAGE_ML=softnix/runtime-ml:py311
 SOFTNIX_EXEC_CONTAINER_NETWORK=none
 SOFTNIX_EXEC_CONTAINER_CPUS=1.0
 SOFTNIX_EXEC_CONTAINER_MEMORY=512m
 SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=256
+SOFTNIX_EXEC_CONTAINER_CACHE_DIR=.softnix/container-cache
+SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=true
 ```
 
 หมายเหตุ:
 - เครื่องที่รัน backend ต้องมี Docker
+- สำหรับงาน data/ml แนะนำ build prebuilt runtime image ก่อนใช้งาน:
+  ```bash
+  ./scripts/build_runtime_images.sh
+  ```
+  script นี้จะ build:
+  - `softnix/runtime-data:py311` (มี numpy/pandas/scipy และ web parsing libs)
+  - `softnix/runtime-ml:py311` (เพิ่ม scikit-learn/matplotlib)
 - โหมด `per_run` จะสร้าง container หนึ่งตัวต่อ run แล้วใช้ `docker exec` สำหรับ action ถัดไป เพื่อลด overhead และคง dependency ระหว่าง action ใน run เดียวกัน
+- รองรับ pip dependency cache ข้าม run ผ่าน mount path `SOFTNIX_EXEC_CONTAINER_CACHE_DIR` (เปิด/ปิดด้วย `SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED`)
+- รองรับ image profile strategy:
+  - `auto`: เลือก profile จาก task/skills (`scraping|ml|qa|web|data|base`) อัตโนมัติ
+  - `base|web|data|scraping|ml|qa`: บังคับ profile ตายตัว
+  - image ของแต่ละ profile กำหนดได้ผ่าน:
+    - `SOFTNIX_EXEC_CONTAINER_IMAGE_BASE`
+    - `SOFTNIX_EXEC_CONTAINER_IMAGE_WEB`
+    - `SOFTNIX_EXEC_CONTAINER_IMAGE_DATA`
+    - `SOFTNIX_EXEC_CONTAINER_IMAGE_SCRAPING`
+    - `SOFTNIX_EXEC_CONTAINER_IMAGE_ML`
+    - `SOFTNIX_EXEC_CONTAINER_IMAGE_QA`
 - action `web_fetch` ยังเป็น HTTP client ของ backend process (ไม่รันใน container runtime)
 
 ความหมายของ `SOFTNIX_EXEC_CONTAINER_LIFECYCLE`:
@@ -290,7 +315,17 @@ SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=256
 - รองรับ validation จากแผน (`plan.validations`) เช่น:
   - `{"type":"file_exists","path":"result.txt"}`
   - `{"type":"text_in_file","path":"result.txt","contains":"success"}`
+- รองรับ `{"type":"python_import","path":"calculate_stats.py","module":"numpy"}` เพื่อบังคับการใช้ module เฉพาะในไฟล์ Python
+- auto-infer validation จาก task สำหรับ requirement library:
+  - ถ้า task ระบุ `numpy`/`pandas`/`scipy` และมีไฟล์ `.py` เป็น output ระบบจะตรวจว่าไฟล์นั้น import module ที่ระบุจริงก่อนสรุปผลว่า completed
 - หาก validation ไม่ผ่าน ระบบจะบังคับ `done=false` และใส่เหตุผลลง output/events เพื่อให้ agent iterate ต่อ
+
+### No-progress Detection (P0)
+
+- ระบบตรวจลูปซ้ำที่ไม่เกิดความคืบหน้า (plan/actions/results/output ซ้ำกันหลายรอบ)
+- หากเกิน threshold (`SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD`, default `3`) จะหยุด run ด้วย `stop_reason=no_progress`
+- event จะระบุ `signature=<hash>` และ `actions=<...>` เพื่อช่วย debug root cause ใน timeline
+- ช่วยลดการวนจน `max_iters` โดยไม่คืบหน้า
 
 ## Core Memory (Markdown-first)
 

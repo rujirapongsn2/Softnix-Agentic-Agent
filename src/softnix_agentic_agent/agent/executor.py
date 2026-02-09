@@ -26,6 +26,8 @@ class SafeActionExecutor:
         exec_container_cpus: float = 1.0,
         exec_container_memory: str = "512m",
         exec_container_pids_limit: int = 256,
+        exec_container_cache_dir: Path | None = None,
+        exec_container_pip_cache_enabled: bool = True,
         run_id: str = "",
         max_output_chars: int = 12000,
         web_fetch_tls_verify: bool = True,
@@ -46,6 +48,11 @@ class SafeActionExecutor:
         self.exec_container_cpus = max(0.1, float(exec_container_cpus))
         self.exec_container_memory = (exec_container_memory or "512m").strip()
         self.exec_container_pids_limit = max(32, int(exec_container_pids_limit))
+        cache_dir = exec_container_cache_dir or (self.workspace / ".softnix/container-cache")
+        self.exec_container_cache_dir = Path(cache_dir).resolve()
+        self.exec_container_pip_cache_enabled = bool(exec_container_pip_cache_enabled)
+        if self.exec_container_pip_cache_enabled:
+            self.exec_container_cache_dir.mkdir(parents=True, exist_ok=True)
         self.run_id = (run_id or "").strip()
         self._container_started = False
         self._container_name = self._build_container_name(self.run_id)
@@ -372,7 +379,7 @@ class SafeActionExecutor:
 
     def _build_per_action_container_command(self, parts: list[str]) -> list[str]:
         mapped = [self._map_workspace_path_for_container(p) for p in parts]
-        return [
+        command = [
             "docker",
             "run",
             "--rm",
@@ -388,12 +395,14 @@ class SafeActionExecutor:
             f"{self.workspace}:/workspace",
             "-w",
             "/workspace",
-            self.exec_container_image,
-            *mapped,
         ]
+        if self.exec_container_pip_cache_enabled:
+            command.extend(["-v", f"{self.exec_container_cache_dir}:/root/.cache/pip"])
+        command.extend([self.exec_container_image, *mapped])
+        return command
 
     def _build_container_bootstrap_command(self) -> list[str]:
-        return [
+        command = [
             "docker",
             "run",
             "-d",
@@ -412,11 +421,11 @@ class SafeActionExecutor:
             f"{self.workspace}:/workspace",
             "-w",
             "/workspace",
-            self.exec_container_image,
-            "sh",
-            "-lc",
-            "while true; do sleep 3600; done",
         ]
+        if self.exec_container_pip_cache_enabled:
+            command.extend(["-v", f"{self.exec_container_cache_dir}:/root/.cache/pip"])
+        command.extend([self.exec_container_image, "sh", "-lc", "while true; do sleep 3600; done"])
+        return command
 
     def _build_container_exec_command(self, parts: list[str]) -> list[str]:
         mapped = [self._map_workspace_path_for_container(p) for p in parts]
