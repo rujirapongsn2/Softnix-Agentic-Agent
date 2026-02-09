@@ -27,31 +27,44 @@ CLI-first agent framework ที่ทำงานตาม flow:
 
 ```mermaid
 flowchart LR
-    User["User"] --> CLI["CLI (softnix run/resume)"]
-    User --> WEB["Web UI (React/Vite)"]
+    USER["User"] --> CLI["CLI (softnix run/resume)"]
+    USER --> WEB["Web UI (React/Vite)"]
+    USER --> TG["Telegram Bot"]
 
-    WEB --> API["REST API Facade (FastAPI)"]
-    CLI --> CORE["Agent Core"]
-    API --> CORE
+    CLI --> API["FastAPI Facade"]
+    WEB -->|REST + SSE| API
+    TG -->|Webhook/Poll| API
 
-    CORE --> LOOP["Agent Loop"]
+    API --> LOOP["Agent Loop"]
     LOOP --> PLAN["Planner"]
-    LOOP --> EXEC["Safe Action Executor"]
-    LOOP --> STORE["FilesystemStore"]
-    LOOP --> SKILLS["Skill Loader/Parser"]
+    PLAN --> PROVIDERS["LLM Providers (OpenAI/Claude/Custom)"]
+    LOOP --> EXEC["Executor (safe actions)"]
+    LOOP --> SKILLS["Skill Loader (SKILL.md)"]
+    LOOP --> MEMORY["Core Memory Service"]
+    LOOP --> STORE["Filesystem Store"]
 
-    PLAN --> PROVIDERS["LLM Providers (OpenAI / Claude / Custom)"]
+    MEMORY --> PROFILE["workspace/memory/PROFILE.md"]
+    MEMORY --> SESSION["workspace/memory/SESSION.md"]
+    MEMORY --> POLICY[".softnix/system/POLICY.md"]
+    ADMIN["Memory Admin Control Plane"] --> POLICY
+    ADMIN --> ADMINKEYS[".softnix/system/MEMORY_ADMIN_KEYS.json"]
+    ADMIN --> AUDIT[".softnix/system/MEMORY_ADMIN_AUDIT.jsonl"]
+    API --> ADMIN
+
+    EXEC --> RUNTIME{"Execution Runtime"}
+    RUNTIME --> HOST["Host"]
+    RUNTIME --> CONTAINER["Container (per_action/per_run)"]
+    CONTAINER --> CACHE[".softnix/container-cache (pip cache)"]
     EXEC --> WORKSPACE["Workspace Files"]
-    STORE --> RUNS[".softnix/runs/<run_id>"]
 
+    STORE --> RUNS[".softnix/runs/<run_id>/"]
     RUNS --> STATE["state.json"]
     RUNS --> ITERS["iterations.jsonl"]
     RUNS --> EVENTS["events.log"]
     RUNS --> ARTIFACTS["artifacts/"]
 
-    API --> RUNS
-    WEB -->|SSE + REST| API
-    WEB -->|Download artifacts| API
+    TG <-->|Run status + artifacts| API
+    WEB -->|Artifacts download| API
 ```
 
 ลำดับการทำงานหลัก:
