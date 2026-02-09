@@ -255,6 +255,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      void syncRunsFromExternalTriggers();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [selectedRunId, pending, runs]);
+
+  useEffect(() => {
     if (!selectedRunId) return;
     streamRef.current?.close();
     void refreshArtifacts(selectedRunId);
@@ -306,6 +313,36 @@ export function App() {
       setSelectedRunId(runsResp.items[0].run_id);
       await hydrateTimeline(runsResp.items[0].run_id);
     }
+  }
+
+  async function syncRunsFromExternalTriggers() {
+    if (pending) return;
+    const runsResp = await apiClient.listRuns();
+    setRuns(runsResp.items);
+    if (runsResp.items.length === 0) return;
+
+    const latest = runsResp.items[0];
+    if (!selectedRunId) {
+      setSelectedRunId(latest.run_id);
+      await Promise.all([
+        hydrateTimeline(latest.run_id),
+        refreshArtifacts(latest.run_id),
+        refreshMemoryPanel(latest.run_id)
+      ]);
+      return;
+    }
+
+    if (latest.run_id === selectedRunId) return;
+    const current = runs.find((r) => r.run_id === selectedRunId) ?? null;
+    if (current?.status === "running") return;
+    if (latest.status !== "running") return;
+
+    setSelectedRunId(latest.run_id);
+    await Promise.all([
+      hydrateTimeline(latest.run_id),
+      refreshArtifacts(latest.run_id),
+      refreshMemoryPanel(latest.run_id)
+    ]);
   }
 
   async function refreshSkills() {
