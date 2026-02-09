@@ -68,6 +68,7 @@
   - เพิ่ม API endpoints:
     - `POST /telegram/webhook`
     - `POST /telegram/poll`
+    - `GET /telegram/metrics`
   - รองรับ command พื้นฐาน:
     - `/run <task>`
     - `/status <run_id>`
@@ -76,6 +77,9 @@
     - `/pending <run_id>`
     - `/help`
   - เพิ่ม config/env รองรับ Telegram Gateway และ system config summary
+  - เพิ่ม final run notification กลับ Telegram อัตโนมัติเมื่อ run จบ
+  - เพิ่ม artifact delivery กลับ Telegram ด้วย `sendDocument` (ล่าสุดสูงสุด 3 ไฟล์)
+  - ปรับ Web UI ให้ auto-refresh run list และ auto-follow run ใหม่จาก external trigger (เช่น Telegram) เพื่อให้เห็น Conversation Timeline แบบ near real-time
 
 ## P0 (ต้องทำก่อน)
 
@@ -182,16 +186,18 @@
 
 ## ลำดับแนะนำถัดไป (Next 3)
 
-1. Execution benchmark + observability hardening
+1. Telegram Gateway Phase 2 (Hardening)
+- เพิ่ม rate limit / cooldown ต่อ chat เพื่อกัน abuse
+- เพิ่ม idempotency + dedup กัน Telegram update ซ้ำ
+- เพิ่ม audit mapping `telegram_chat_id <-> run_id` พร้อม query/debug endpoint
+
+2. Execution benchmark + observability hardening
 - วัดผล `per_action` vs `per_run` และ image profiles (`base/web/data/ml`) ด้วย task ชุดมาตรฐาน
 - เก็บ metrics: success rate, median duration, iteration count, dependency install time
 
-2. Objective contract generator
+3. Objective contract generator
 - แปลง task เป็น validation contract อัตโนมัติให้เข้มขึ้น (ไฟล์, เนื้อหา, import/module, freshness)
 - ลดเคส completed หลอกในงานเขียน/รันโค้ดหลายขั้นตอน
-
-3. Telegram Gateway MVP (เริ่ม P1 ที่มี impact สูง)
-- เปิดช่องทางสั่งงานจริงนอก Web UI พร้อม status/cancel/resume/pending flows
 
 ## Definition of Done (ทุกหัวข้อ)
 
