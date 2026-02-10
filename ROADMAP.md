@@ -48,7 +48,24 @@
 - ผลลัพธ์: ผู้ใช้สั่งงานและติดตาม run ผ่าน Telegram ได้ end-to-end อย่างปลอดภัย
 - เอกสารอ้างอิงสเปก: `docs/telegram-gateway-spec.md`
 
-4. CI/CD pipeline
+4. Scheduled Runs / Cron Workflow
+- เป้าหมาย: ให้ผู้ใช้ตั้งเวลารัน task ล่วงหน้าได้ (one-time และ recurring) โดยไม่ต้อง trigger เอง
+- ขอบเขต:
+  - สร้าง schedule แบบกำหนดเวลา (`วันนี้ 09:00`) และแบบ cron
+  - dispatch เข้า run pipeline เดิม และ track ความสัมพันธ์ `schedule_id <-> run_id`
+  - รองรับการส่งผลลัพธ์กลับ Web UI / Telegram
+- งานหลัก (Phase 2: Hardening):
+  - idempotency guard ต่อ due slot
+  - retry policy + backoff สำหรับ dispatch fail
+  - access control/rate limit ต่อ owner/chat
+  - metrics + audit log สำหรับ scheduling
+- งานหลัก (Phase 3: UX):
+  - Web UI schedule management
+  - schedule templates (daily summary/news digest)
+- ผลลัพธ์: ระบบรองรับงานอัตโนมัติแบบ cron-like ได้ครบวงจร
+- เอกสารอ้างอิงสเปก: `docs/scheduling-spec.md`
+
+5. CI/CD pipeline
 - เป้าหมาย: คุมคุณภาพอัตโนมัติทุก PR/Push
 - งานหลัก:
   - backend: `pytest`
@@ -56,7 +73,7 @@
   - deployment: `docker compose config`
 - ผลลัพธ์: ลด regression ก่อน merge
 
-5. Monitoring/alerts for long-running runs
+6. Monitoring/alerts for long-running runs
 - เป้าหมาย: มองเห็นปัญหา run ค้าง/timeout/provider error ได้เร็ว
 - งานหลัก:
   - timeout threshold
@@ -65,7 +82,7 @@
   - alert output (เริ่มจาก log/webhook)
 - ผลลัพธ์: ดูแลระบบง่ายขึ้นและลดเวลาตรวจ incident
 
-6. Authentication model for production
+7. Authentication model for production
 - เป้าหมาย: ยกระดับจาก static API key ไป session/token
 - งานหลัก:
   - token/session lifecycle
@@ -75,7 +92,7 @@
 
 ## P2 (เสริมความแข็งแรง)
 
-7. Security hardening phase 2
+8. Security hardening phase 2
 - เป้าหมาย: เพิ่ม defense-in-depth
 - งานหลัก:
   - rate limiting
@@ -83,7 +100,7 @@
   - request id tracing
 - ผลลัพธ์: สืบสวนปัญหาและป้องกัน abuse ได้ดีขึ้น
 
-8. Release package and runbook
+9. Release package and runbook
 - เป้าหมาย: ทำให้ทีม deploy/operate ได้มาตรฐาน
 - งานหลัก:
   - versioning + changelog
@@ -93,18 +110,19 @@
 
 ## ลำดับแนะนำถัดไป (Next 3)
 
-1. Telegram Gateway Phase 2 (Hardening)
+1. Scheduled Runs / Cron Workflow (Phase 2: Hardening)
+- เพิ่ม idempotency guard กัน dispatch ซ้ำใน due slot เดียวกัน
+- เพิ่ม retry/backoff พร้อม error classification
+- เพิ่ม scheduling metrics + audit events
+
+2. Telegram Gateway Phase 2 (Hardening)
 - เพิ่ม rate limit / cooldown ต่อ chat เพื่อกัน abuse
 - เพิ่ม idempotency + dedup กัน Telegram update ซ้ำ
 - เพิ่ม audit mapping `telegram_chat_id <-> run_id` พร้อม query/debug endpoint
 
-2. Execution benchmark + observability hardening
+3. Execution benchmark + observability hardening
 - วัดผล `per_action` vs `per_run` และ image profiles (`base/web/data/ml`) ด้วย task ชุดมาตรฐาน
 - เก็บ metrics: success rate, median duration, iteration count, dependency install time
-
-3. Objective contract generator
-- แปลง task เป็น validation contract อัตโนมัติให้เข้มขึ้น (ไฟล์, เนื้อหา, import/module, freshness)
-- ลดเคส completed หลอกในงานเขียน/รันโค้ดหลายขั้นตอน
 
 ## Definition of Done (ทุกหัวข้อ)
 

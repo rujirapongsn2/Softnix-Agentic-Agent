@@ -192,3 +192,28 @@ def test_telegram_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.telegram_webhook_secret == "secret-x"
     assert settings.telegram_poll_interval_sec == 2.5
     assert settings.telegram_max_task_chars == 1600
+
+
+def test_scheduler_config_from_env(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "SOFTNIX_SCHEDULER_ENABLED=true\n"
+        "SOFTNIX_SCHEDULER_DIR=.softnix/custom-schedules\n"
+        "SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC=7\n"
+        "SOFTNIX_SCHEDULER_MAX_DISPATCH_PER_TICK=11\n"
+        "SOFTNIX_SCHEDULER_DEFAULT_TIMEZONE=Asia/Bangkok\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SOFTNIX_SCHEDULER_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_SCHEDULER_DIR", raising=False)
+    monkeypatch.delenv("SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_SCHEDULER_MAX_DISPATCH_PER_TICK", raising=False)
+    monkeypatch.delenv("SOFTNIX_SCHEDULER_DEFAULT_TIMEZONE", raising=False)
+
+    settings = load_settings()
+    assert settings.scheduler_enabled is True
+    assert str(settings.scheduler_dir) == ".softnix/custom-schedules"
+    assert settings.scheduler_poll_interval_sec == 7
+    assert settings.scheduler_max_dispatch_per_tick == 11
+    assert settings.scheduler_default_timezone == "Asia/Bangkok"

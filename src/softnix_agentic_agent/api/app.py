@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import secrets
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from softnix_agentic_agent.config import load_settings
 from softnix_agentic_agent.integrations.telegram_gateway import TelegramGateway
+from softnix_agentic_agent.integrations.schedule_parser import parse_natural_schedule_text
 from softnix_agentic_agent.memory.admin_control import AdminPrincipal, MemoryAdminControlPlane
 from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
 from softnix_agentic_agent.memory.service import CoreMemoryService
@@ -21,6 +24,7 @@ from softnix_agentic_agent.providers.factory import create_provider
 from softnix_agentic_agent.runtime import build_runner
 from softnix_agentic_agent.skills.loader import SkillLoader
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
+from softnix_agentic_agent.storage.schedule_store import ScheduleStore, compute_next_run_at
 
 
 class RunCreateRequest(BaseModel):
@@ -30,6 +34,44 @@ class RunCreateRequest(BaseModel):
     max_iters: int = Field(default=10, ge=1)
     workspace: str | None = None
     skills_dir: str = "skillpacks"
+
+
+class ScheduleCreateRequest(BaseModel):
+    task: str
+    schedule_type: str = Field(default="one_time")
+    run_at: str | None = None
+    cron_expr: str | None = None
+    timezone: str | None = None
+    enabled: bool = True
+    owner_type: str = "system"
+    owner_id: str = "default"
+    delivery_channel: str = "web_ui"
+    delivery_target: str | None = None
+
+
+class ScheduleUpdateRequest(BaseModel):
+    task: str | None = None
+    run_at: str | None = None
+    cron_expr: str | None = None
+    timezone: str | None = None
+    enabled: bool | None = None
+    delivery_channel: str | None = None
+    delivery_target: str | None = None
+
+
+class ScheduleParseRequest(BaseModel):
+    text: str
+    timezone: str | None = None
+
+
+class ScheduleCreateFromTextRequest(BaseModel):
+    text: str
+    timezone: str | None = None
+    enabled: bool = True
+    owner_type: str = "system"
+    owner_id: str = "default"
+    delivery_channel: str = "web_ui"
+    delivery_target: str | None = None
 
 
 class MemoryDecisionRequest(BaseModel):
@@ -50,9 +92,12 @@ class AdminRevokeKeyRequest(BaseModel):
 app = FastAPI(title="Softnix Agentic Agent API", version="0.1.0")
 _settings = load_settings()
 _store = FilesystemStore(_settings.runs_dir)
+_schedule_store = ScheduleStore(_settings.scheduler_dir)
 _threads: dict[str, threading.Thread] = {}
 _telegram_gateway: TelegramGateway | None = None
 _memory_admin: MemoryAdminControlPlane | None = None
+_scheduler_thread: threading.Thread | None = None
+_scheduler_stop = threading.Event()
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,10 +132,142 @@ def _background_execute(run_id: str, provider: str, model: str | None) -> None:
     runner.execute_prepared_run(run_id)
 
 
+def _background_execute_and_notify_telegram(
+    run_id: str,
+    provider: str,
+    model: str | None,
+    chat_id: str,
+) -> None:
+    runner = build_runner(_settings, provider_name=provider, model=model)
+    runner.execute_prepared_run(run_id)
+    try:
+        gateway = _build_telegram_gateway()
+        gateway.notify_run_finished(chat_id=chat_id, run_id=run_id)
+    except Exception:
+        return
+
+
 def _background_resume(run_id: str) -> None:
     state = _store.read_state(run_id)
     runner = build_runner(_settings, provider_name=state.provider, model=state.model)
     runner.resume_run(run_id)
+
+
+def _normalize_run_at(run_at: str, timezone_name: str) -> str:
+    text = run_at.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(timezone_name))
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _validate_schedule_inputs(
+    schedule_type: str,
+    run_at: str | None,
+    cron_expr: str | None,
+    timezone_name: str,
+) -> tuple[str | None, str | None, str]:
+    schedule_type_value = schedule_type.strip().lower()
+    if schedule_type_value not in {"one_time", "cron"}:
+        raise HTTPException(status_code=400, detail="schedule_type must be one_time or cron")
+    try:
+        _ = ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid timezone") from exc
+
+    run_at_value = run_at
+    cron_expr_value = cron_expr
+    if schedule_type_value == "one_time":
+        if not run_at:
+            raise HTTPException(status_code=400, detail="run_at is required for one_time schedule")
+        try:
+            run_at_value = _normalize_run_at(run_at, timezone_name)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid run_at datetime") from exc
+        cron_expr_value = None
+    else:
+        if not cron_expr:
+            raise HTTPException(status_code=400, detail="cron_expr is required for cron schedule")
+        run_at_value = None
+    try:
+        _ = compute_next_run_at(
+            schedule_type=schedule_type_value,
+            timezone_name=timezone_name,
+            run_at=run_at_value,
+            cron_expr=cron_expr_value,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid schedule expression: {exc}") from exc
+    return run_at_value, cron_expr_value, schedule_type_value
+
+
+def _start_run_from_schedule(schedule: dict) -> str:
+    provider_name = _settings.provider
+    model = _settings.model
+    runner = build_runner(_settings, provider_name=provider_name, model=model)
+    state = runner.prepare_run(
+        task=str(schedule["task"]),
+        provider_name=provider_name,
+        model=model,
+        workspace=_settings.workspace,
+        skills_dir=_settings.skills_dir,
+        max_iters=_settings.max_iters,
+    )
+    _schedule_store.append_schedule_run(schedule_id=schedule["id"], run_id=state.run_id, status="queued")
+    delivery_channel = str(schedule.get("delivery_channel", "")).strip().lower()
+    delivery_target = str(schedule.get("delivery_target", "")).strip()
+    if delivery_channel == "telegram" and delivery_target:
+        thread_target = _background_execute_and_notify_telegram
+        thread_args = (state.run_id, provider_name, model, delivery_target)
+    else:
+        thread_target = _background_execute
+        thread_args = (state.run_id, provider_name, model)
+    t = threading.Thread(
+        target=thread_target,
+        args=thread_args,
+        daemon=True,
+    )
+    _threads[state.run_id] = t
+    t.start()
+    return state.run_id
+
+
+def _scheduler_loop() -> None:
+    while not _scheduler_stop.is_set():
+        try:
+            now_utc = datetime.now(timezone.utc)
+            due_items = _schedule_store.list_due_schedules(
+                now_utc=now_utc,
+                limit=max(1, int(_settings.scheduler_max_dispatch_per_tick)),
+            )
+            for item in due_items:
+                try:
+                    _start_run_from_schedule(item)
+                    _schedule_store.mark_dispatched(item["id"], now_utc)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        _scheduler_stop.wait(max(1.0, float(_settings.scheduler_poll_interval_sec)))
+
+
+@app.on_event("startup")
+def _startup_scheduler() -> None:
+    global _scheduler_thread
+    if not _settings.scheduler_enabled:
+        return
+    if _scheduler_thread is not None and _scheduler_thread.is_alive():
+        return
+    _scheduler_stop.clear()
+    _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
+    _scheduler_thread.start()
+
+
+@app.on_event("shutdown")
+def _shutdown_scheduler() -> None:
+    _scheduler_stop.set()
 
 
 _SKILLS_EVENT_RE = re.compile(r"skills selected iteration=\d+ names=(.+)$")
@@ -165,6 +342,180 @@ def get_run(run_id: str) -> dict:
         return _state_payload(state)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="run not found") from exc
+
+
+@app.post("/schedules")
+def create_schedule(payload: ScheduleCreateRequest) -> dict:
+    timezone_name = (payload.timezone or _settings.scheduler_default_timezone).strip()
+    run_at_value, cron_expr_value, schedule_type = _validate_schedule_inputs(
+        schedule_type=payload.schedule_type,
+        run_at=payload.run_at,
+        cron_expr=payload.cron_expr,
+        timezone_name=timezone_name,
+    )
+    next_run_at = compute_next_run_at(
+        schedule_type=schedule_type,
+        timezone_name=timezone_name,
+        run_at=run_at_value,
+        cron_expr=cron_expr_value,
+    )
+    item = _schedule_store.create_schedule(
+        {
+            "task": payload.task,
+            "schedule_type": schedule_type,
+            "run_at": run_at_value,
+            "cron_expr": cron_expr_value,
+            "timezone": timezone_name,
+            "enabled": payload.enabled,
+            "next_run_at": next_run_at if payload.enabled else None,
+            "owner_type": payload.owner_type,
+            "owner_id": payload.owner_id,
+            "delivery_channel": payload.delivery_channel,
+            "delivery_target": payload.delivery_target,
+        }
+    )
+    return {"item": item}
+
+
+@app.post("/schedules/parse")
+def parse_schedule(payload: ScheduleParseRequest) -> dict:
+    timezone_name = (payload.timezone or _settings.scheduler_default_timezone).strip()
+    try:
+        parsed = parse_natural_schedule_text(payload.text, timezone_name=timezone_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"item": parsed.to_dict()}
+
+
+@app.post("/schedules/from-text")
+def create_schedule_from_text(payload: ScheduleCreateFromTextRequest) -> dict:
+    timezone_name = (payload.timezone or _settings.scheduler_default_timezone).strip()
+    try:
+        parsed = parse_natural_schedule_text(payload.text, timezone_name=timezone_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    next_run_at = compute_next_run_at(
+        schedule_type=parsed.schedule_type,
+        timezone_name=parsed.timezone,
+        run_at=parsed.run_at,
+        cron_expr=parsed.cron_expr,
+    )
+    item = _schedule_store.create_schedule(
+        {
+            "task": parsed.task,
+            "schedule_type": parsed.schedule_type,
+            "run_at": parsed.run_at,
+            "cron_expr": parsed.cron_expr,
+            "timezone": parsed.timezone,
+            "enabled": payload.enabled,
+            "next_run_at": next_run_at if payload.enabled else None,
+            "owner_type": payload.owner_type,
+            "owner_id": payload.owner_id,
+            "delivery_channel": payload.delivery_channel,
+            "delivery_target": payload.delivery_target,
+        }
+    )
+    return {"item": item, "parsed": parsed.to_dict()}
+
+
+@app.get("/schedules")
+def list_schedules(include_disabled: bool = Query(default=True)) -> dict:
+    return {"items": _schedule_store.list_schedules(include_disabled=include_disabled)}
+
+
+@app.get("/schedules/{schedule_id}")
+def get_schedule(schedule_id: str) -> dict:
+    try:
+        item = _schedule_store.get_schedule(schedule_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="schedule not found") from exc
+    return {"item": item}
+
+
+@app.patch("/schedules/{schedule_id}")
+def update_schedule(schedule_id: str, payload: ScheduleUpdateRequest) -> dict:
+    try:
+        current = _schedule_store.get_schedule(schedule_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="schedule not found") from exc
+
+    next_task = payload.task if payload.task is not None else str(current["task"])
+    next_timezone = (payload.timezone if payload.timezone is not None else current["timezone"]).strip()
+    next_enabled = bool(payload.enabled) if payload.enabled is not None else bool(current.get("enabled", True))
+    next_schedule_type = str(current["schedule_type"])
+    next_run_at = payload.run_at if payload.run_at is not None else current.get("run_at")
+    next_cron_expr = payload.cron_expr if payload.cron_expr is not None else current.get("cron_expr")
+
+    normalized_run_at, normalized_cron_expr, schedule_type = _validate_schedule_inputs(
+        schedule_type=next_schedule_type,
+        run_at=next_run_at,
+        cron_expr=next_cron_expr,
+        timezone_name=next_timezone,
+    )
+    computed_next_run_at = compute_next_run_at(
+        schedule_type=schedule_type,
+        timezone_name=next_timezone,
+        run_at=normalized_run_at,
+        cron_expr=normalized_cron_expr,
+    )
+
+    updates = {
+        "task": next_task,
+        "timezone": next_timezone,
+        "run_at": normalized_run_at,
+        "cron_expr": normalized_cron_expr,
+        "enabled": next_enabled,
+        "next_run_at": computed_next_run_at if next_enabled else None,
+    }
+    if payload.delivery_channel is not None:
+        updates["delivery_channel"] = payload.delivery_channel
+    if payload.delivery_target is not None:
+        updates["delivery_target"] = payload.delivery_target
+
+    item = _schedule_store.update_schedule(schedule_id, updates)
+    return {"item": item}
+
+
+@app.delete("/schedules/{schedule_id}")
+def delete_schedule(schedule_id: str) -> dict:
+    try:
+        item = _schedule_store.delete_schedule(schedule_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="schedule not found") from exc
+    return {"status": "deleted", "item": item}
+
+
+@app.post("/schedules/{schedule_id}/run-now")
+def run_schedule_now(schedule_id: str) -> dict:
+    try:
+        item = _schedule_store.get_schedule(schedule_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="schedule not found") from exc
+    run_id = _start_run_from_schedule(item)
+    _schedule_store.mark_dispatched(schedule_id, datetime.now(timezone.utc))
+    return {"status": "started", "schedule_id": schedule_id, "run_id": run_id}
+
+
+@app.get("/schedules/{schedule_id}/runs")
+def list_schedule_runs(schedule_id: str, limit: int = Query(default=50, ge=1, le=200)) -> dict:
+    try:
+        _ = _schedule_store.get_schedule(schedule_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="schedule not found") from exc
+    rows = _schedule_store.read_schedule_runs(schedule_id, limit=limit)
+    enriched: list[dict] = []
+    for row in rows:
+        run_id = row.get("run_id")
+        if not run_id:
+            enriched.append(row)
+            continue
+        try:
+            state = _store.read_state(str(run_id))
+            row = {**row, "run_status": state.status.value, "run_stop_reason": state.stop_reason.value if state.stop_reason else None}
+        except FileNotFoundError:
+            pass
+        enriched.append(row)
+    return {"items": enriched}
 
 
 @app.get("/runs/{run_id}/iterations")
@@ -676,4 +1027,9 @@ def system_config() -> dict:
         "telegram_webhook_secret_configured": bool(_settings.telegram_webhook_secret),
         "telegram_poll_interval_sec": _settings.telegram_poll_interval_sec,
         "telegram_max_task_chars": _settings.telegram_max_task_chars,
+        "scheduler_enabled": _settings.scheduler_enabled,
+        "scheduler_dir": str(_settings.scheduler_dir),
+        "scheduler_poll_interval_sec": _settings.scheduler_poll_interval_sec,
+        "scheduler_max_dispatch_per_tick": _settings.scheduler_max_dispatch_per_tick,
+        "scheduler_default_timezone": _settings.scheduler_default_timezone,
     }

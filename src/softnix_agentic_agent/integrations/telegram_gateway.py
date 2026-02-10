@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from softnix_agentic_agent.config import Settings
+from softnix_agentic_agent.integrations.schedule_parser import parse_natural_schedule_text
 from softnix_agentic_agent.integrations.telegram_client import TelegramClient
 from softnix_agentic_agent.integrations.telegram_parser import TelegramCommand, parse_telegram_command
 from softnix_agentic_agent.integrations.telegram_templates import (
@@ -19,6 +20,7 @@ from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
 from softnix_agentic_agent.memory.service import CoreMemoryService
 from softnix_agentic_agent.runtime import build_runner
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
+from softnix_agentic_agent.storage.schedule_store import ScheduleStore, compute_next_run_at
 
 
 class TelegramGateway:
@@ -34,6 +36,7 @@ class TelegramGateway:
         self.thread_registry = thread_registry
         self.client = client or TelegramClient(bot_token=settings.telegram_bot_token or "")
         self._next_offset = 0
+        self.schedule_store = ScheduleStore(settings.scheduler_dir)
         self._run_chat_map: dict[str, str] = {}
         self._metrics_lock = threading.Lock()
         self._metrics: dict[str, Any] = {
@@ -100,6 +103,16 @@ class TelegramGateway:
             return help_text()
         if cmd.name == "run":
             return self._run_task(chat_id=chat_id, task=cmd.arg)
+        if cmd.name == "schedule":
+            return self._schedule_task(chat_id=chat_id, text=cmd.arg)
+        if cmd.name == "schedules":
+            return self._list_schedules(chat_id=chat_id)
+        if cmd.name == "schedule_runs":
+            return self._list_schedule_runs(chat_id=chat_id, schedule_id=cmd.arg)
+        if cmd.name == "schedule_disable":
+            return self._disable_schedule(chat_id=chat_id, schedule_id=cmd.arg)
+        if cmd.name == "schedule_delete":
+            return self._delete_schedule(chat_id=chat_id, schedule_id=cmd.arg)
         if cmd.name == "status":
             return self._status(cmd.arg)
         if cmd.name == "cancel":
@@ -135,9 +148,143 @@ class TelegramGateway:
         thread.start()
         return started_text(state.run_id, raw)
 
+    def _schedule_task(self, chat_id: str, text: str) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return "Usage: /schedule วันนี้ 09:00 <task> | /schedule ทุกวัน 09:00 <task>"
+        timezone_name = self.settings.scheduler_default_timezone
+        try:
+            parsed = parse_natural_schedule_text(raw, timezone_name=timezone_name)
+            next_run_at = compute_next_run_at(
+                schedule_type=parsed.schedule_type,
+                timezone_name=parsed.timezone,
+                run_at=parsed.run_at,
+                cron_expr=parsed.cron_expr,
+            )
+        except Exception as exc:
+            return f"Schedule parse error: {exc}"
+
+        item = self.schedule_store.create_schedule(
+            {
+                "task": parsed.task,
+                "schedule_type": parsed.schedule_type,
+                "run_at": parsed.run_at,
+                "cron_expr": parsed.cron_expr,
+                "timezone": parsed.timezone,
+                "enabled": True,
+                "next_run_at": next_run_at,
+                "owner_type": "chat",
+                "owner_id": chat_id,
+                "delivery_channel": "telegram",
+                "delivery_target": chat_id,
+            }
+        )
+        if parsed.schedule_type == "cron":
+            schedule_part = f"cron={item.get('cron_expr')}"
+        else:
+            schedule_part = f"run_at={item.get('run_at')}"
+        return (
+            f"Schedule created: {item['id']}\n"
+            f"type: {item['schedule_type']}\n"
+            f"{schedule_part}\n"
+            f"timezone: {item['timezone']}\n"
+            f"next_run_at: {item.get('next_run_at')}"
+        )
+
+    def _list_schedules(self, chat_id: str) -> str:
+        items = [
+            item
+            for item in self.schedule_store.list_schedules(include_disabled=True)
+            if str(item.get("owner_type", "")) == "chat" and str(item.get("owner_id", "")) == chat_id
+        ]
+        if not items:
+            return "No schedules for this chat"
+        lines = [f"Schedules ({len(items)}):"]
+        for item in items[:20]:
+            sid = str(item.get("id", ""))
+            status = "enabled" if bool(item.get("enabled", False)) else "disabled"
+            sch_type = str(item.get("schedule_type", ""))
+            if sch_type == "cron":
+                schedule_part = f"cron={item.get('cron_expr')}"
+            else:
+                schedule_part = f"run_at={item.get('run_at')}"
+            lines.append(f"- {sid} [{status}] {sch_type} {schedule_part}")
+        return "\n".join(lines)
+
+    def _list_schedule_runs(self, chat_id: str, schedule_id: str) -> str:
+        sid = (schedule_id or "").strip()
+        if not sid:
+            return "Usage: /schedule_runs <schedule_id>"
+        try:
+            item = self.schedule_store.get_schedule(sid)
+        except FileNotFoundError:
+            return f"Schedule not found: {sid}"
+        if str(item.get("owner_type", "")) != "chat" or str(item.get("owner_id", "")) != chat_id:
+            return f"Schedule not found: {sid}"
+        rows = self.schedule_store.read_schedule_runs(sid, limit=10)
+        if not rows:
+            return f"Schedule {sid}: no runs yet"
+        lines = [f"Schedule {sid}: recent runs ({len(rows)})"]
+        for row in rows:
+            run_id = str(row.get("run_id", ""))
+            status = str(row.get("status", "-"))
+            stop_reason = "-"
+            if run_id:
+                try:
+                    state = self.store.read_state(run_id)
+                    status = state.status.value
+                    stop_reason = state.stop_reason.value if state.stop_reason else "-"
+                except FileNotFoundError:
+                    pass
+            created_at = str(row.get("created_at", ""))
+            lines.append(f"- {run_id} status={status} stop_reason={stop_reason} at={created_at}")
+        return "\n".join(lines)
+
+    def _disable_schedule(self, chat_id: str, schedule_id: str) -> str:
+        sid = (schedule_id or "").strip()
+        if not sid:
+            return "Usage: /schedule_disable <schedule_id>"
+        try:
+            item = self.schedule_store.get_schedule(sid)
+        except FileNotFoundError:
+            return f"Schedule not found: {sid}"
+        if str(item.get("owner_type", "")) != "chat" or str(item.get("owner_id", "")) != chat_id:
+            return f"Schedule not found: {sid}"
+        updated = self.schedule_store.update_schedule(sid, {"enabled": False, "next_run_at": None})
+        return f"Schedule disabled: {sid} (enabled={updated.get('enabled')})"
+
+    def _delete_schedule(self, chat_id: str, schedule_id: str) -> str:
+        sid = (schedule_id or "").strip()
+        if not sid:
+            return "Usage: /schedule_delete <schedule_id>"
+        try:
+            item = self.schedule_store.get_schedule(sid)
+        except FileNotFoundError:
+            return f"Schedule not found: {sid}"
+        if str(item.get("owner_type", "")) != "chat" or str(item.get("owner_id", "")) != chat_id:
+            return f"Schedule not found: {sid}"
+        self.schedule_store.delete_schedule(sid)
+        return f"Schedule deleted: {sid}"
+
+    def notify_run_finished(self, chat_id: str, run_id: str) -> None:
+        state = self.store.read_state(run_id)
+        self.client.send_message(
+            chat_id,
+            final_run_text(
+                run_id=run_id,
+                status=state.status.value,
+                iteration=state.iteration,
+                max_iters=state.max_iters,
+                stop_reason=state.stop_reason.value if state.stop_reason else "-",
+                output=state.last_output,
+            ),
+        )
+        self._increment_metric("run_notifications_sent")
+        self._send_artifacts(chat_id=chat_id, run_id=run_id)
+
     def _run_and_notify(self, runner: Any, run_id: str, chat_id: str) -> None:
         try:
-            final_state = runner.execute_prepared_run(run_id)
+            _ = runner.execute_prepared_run(run_id)
         except Exception as exc:
             self._increment_metric("command_errors")
             self._set_metric_value("last_error", f"run worker error: {exc}")
@@ -146,20 +293,11 @@ class TelegramGateway:
             except Exception:
                 pass
             return
-
-        self.client.send_message(
-            chat_id,
-            final_run_text(
-                run_id=run_id,
-                status=final_state.status.value,
-                iteration=final_state.iteration,
-                max_iters=final_state.max_iters,
-                stop_reason=final_state.stop_reason.value,
-                output=final_state.last_output,
-            ),
-        )
-        self._increment_metric("run_notifications_sent")
-        self._send_artifacts(chat_id=chat_id, run_id=run_id)
+        try:
+            self.notify_run_finished(chat_id=chat_id, run_id=run_id)
+        except Exception as exc:
+            self._increment_metric("command_errors")
+            self._set_metric_value("last_error", f"run notify error: {exc}")
 
     def _send_artifacts(self, chat_id: str, run_id: str) -> None:
         entries = self.store.list_artifact_entries(run_id)

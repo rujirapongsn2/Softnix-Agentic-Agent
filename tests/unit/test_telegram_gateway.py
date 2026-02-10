@@ -120,3 +120,153 @@ def test_gateway_rejects_unauthorized_chat(tmp_path: Path) -> None:
     assert ok is True
     assert any("Unauthorized chat" in text for _, text in fake_client.sent_messages)
 
+
+def test_gateway_schedule_creates_schedule_file(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        scheduler_dir=tmp_path / "schedules",
+        scheduler_default_timezone="Asia/Bangkok",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+    ok = gateway.handle_update(
+        {
+            "update_id": 3,
+            "message": {"chat": {"id": 8388377631}, "text": "/schedule ทุกวัน 09:00 สรุปเว็บไซต์ www.softnix.ai"},
+        }
+    )
+    assert ok is True
+    assert any("Schedule created:" in text for _, text in fake_client.sent_messages)
+    schedule_files = list((tmp_path / "schedules").glob("*.json"))
+    assert len(schedule_files) == 1
+
+
+def test_gateway_schedules_and_schedule_runs(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        scheduler_dir=tmp_path / "schedules",
+        scheduler_default_timezone="Asia/Bangkok",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    gateway.handle_update(
+        {
+            "update_id": 1,
+            "message": {"chat": {"id": 8388377631}, "text": "/schedule ทุกวัน 09:00 สรุปเว็บไซต์ www.softnix.ai"},
+        }
+    )
+    created_messages = [text for _, text in fake_client.sent_messages if "Schedule created:" in text]
+    assert created_messages
+    schedule_id = created_messages[-1].split("Schedule created:", 1)[1].splitlines()[0].strip()
+
+    gateway.handle_update({"update_id": 2, "message": {"chat": {"id": 8388377631}, "text": "/schedules"}})
+    assert any("Schedules (" in text for _, text in fake_client.sent_messages)
+    assert any(schedule_id in text for _, text in fake_client.sent_messages)
+
+    # No runs yet
+    gateway.handle_update(
+        {"update_id": 3, "message": {"chat": {"id": 8388377631}, "text": f"/schedule_runs {schedule_id}"}}
+    )
+    assert any("no runs yet" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_schedule_runs_reflects_runstate_status(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        scheduler_dir=tmp_path / "schedules",
+        scheduler_default_timezone="Asia/Bangkok",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    # Create schedule owned by this chat
+    gateway.handle_update(
+        {
+            "update_id": 1,
+            "message": {"chat": {"id": 8388377631}, "text": "/schedule ทุกวัน 09:00 สรุปเว็บไซต์ www.softnix.ai"},
+        }
+    )
+    created_messages = [text for _, text in fake_client.sent_messages if "Schedule created:" in text]
+    assert created_messages
+    schedule_id = created_messages[-1].split("Schedule created:", 1)[1].splitlines()[0].strip()
+
+    # Create run state as completed
+    run_id = "sched-run-1"
+    state = RunState(
+        run_id=run_id,
+        task="scheduled task",
+        provider="openai",
+        model="m",
+        workspace=str(tmp_path),
+        skills_dir=str(tmp_path),
+        max_iters=10,
+    )
+    state.status = RunStatus.COMPLETED
+    state.stop_reason = StopReason.COMPLETED
+    store.init_run(state)
+    store.write_state(state)
+    gateway.schedule_store.append_schedule_run(schedule_id=schedule_id, run_id=run_id, status="queued")
+
+    gateway.handle_update(
+        {
+            "update_id": 2,
+            "message": {"chat": {"id": 8388377631}, "text": f"/schedule_runs {schedule_id}"},
+        }
+    )
+    text = fake_client.sent_messages[-1][1]
+    assert "status=completed" in text
+    assert "stop_reason=completed" in text
+
+
+def test_gateway_schedule_disable_and_delete(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        scheduler_dir=tmp_path / "schedules",
+        scheduler_default_timezone="Asia/Bangkok",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    gateway.handle_update(
+        {
+            "update_id": 1,
+            "message": {"chat": {"id": 8388377631}, "text": "/schedule ทุกวัน 09:00 สรุปเว็บไซต์ www.softnix.ai"},
+        }
+    )
+    created_messages = [text for _, text in fake_client.sent_messages if "Schedule created:" in text]
+    schedule_id = created_messages[-1].split("Schedule created:", 1)[1].splitlines()[0].strip()
+
+    gateway.handle_update(
+        {"update_id": 2, "message": {"chat": {"id": 8388377631}, "text": f"/schedule_disable {schedule_id}"}}
+    )
+    assert "Schedule disabled" in fake_client.sent_messages[-1][1]
+
+    gateway.handle_update(
+        {"update_id": 3, "message": {"chat": {"id": 8388377631}, "text": f"/schedule_delete {schedule_id}"}}
+    )
+    assert "Schedule deleted" in fake_client.sent_messages[-1][1]

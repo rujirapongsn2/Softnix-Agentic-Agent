@@ -5,6 +5,11 @@ def help_text() -> str:
     return (
         "Commands:\n"
         "/run <task>\n"
+        "/schedule <today/tomorrow/daily text>\n"
+        "/schedules\n"
+        "/schedule_runs <schedule_id>\n"
+        "/schedule_disable <schedule_id>\n"
+        "/schedule_delete <schedule_id>\n"
         "/status <run_id>\n"
         "/cancel <run_id>\n"
         "/resume <run_id>\n"

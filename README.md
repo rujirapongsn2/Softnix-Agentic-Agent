@@ -125,6 +125,11 @@ pip install -e '.[dev]'
 - `SOFTNIX_TELEGRAM_WEBHOOK_SECRET` secret token สำหรับ verify webhook header
 - `SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC` polling interval (ใช้กับ worker/poll mode)
 - `SOFTNIX_TELEGRAM_MAX_TASK_CHARS` จำกัดความยาว task ผ่าน `/run`
+- `SOFTNIX_SCHEDULER_ENABLED` เปิด/ปิด scheduler worker สำหรับงานตั้งเวลา
+- `SOFTNIX_SCHEDULER_DIR` path เก็บ schedule definitions/history
+- `SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC` ความถี่ที่ worker ตรวจงานที่ถึงเวลา
+- `SOFTNIX_SCHEDULER_MAX_DISPATCH_PER_TICK` จำนวนงานสูงสุดที่ dispatch ต่อรอบ
+- `SOFTNIX_SCHEDULER_DEFAULT_TIMEZONE` timezone default ตอนสร้าง schedule
 
 ## การใช้งาน CLI
 
@@ -180,6 +185,15 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `POST /telegram/webhook` รับ Telegram webhook update (public endpoint, แนะนำให้เปิด secret verify)
 - `POST /telegram/poll` ดึง updates แบบ manual 1 รอบ (สำหรับ dev/polling)
 - `GET /telegram/metrics` อ่าน command/error/latency metrics ของ Telegram gateway
+- `POST /schedules` สร้างงานตั้งเวลา (one-time/cron)
+- `POST /schedules/parse` แปลงข้อความธรรมชาติเป็น schedule payload
+- `POST /schedules/from-text` สร้าง schedule จากข้อความธรรมชาติโดยตรง
+- `GET /schedules` อ่านรายการ schedules
+- `GET /schedules/{id}` อ่านรายละเอียด schedule
+- `PATCH /schedules/{id}` แก้ไข schedule (เช่น enable/disable)
+- `DELETE /schedules/{id}` ลบ schedule
+- `POST /schedules/{id}/run-now` สั่งรันทันที
+- `GET /schedules/{id}/runs` อ่านประวัติ run ของ schedule
 
 เมื่อเปิด `SOFTNIX_API_KEY`:
 - ทุก request ที่เข้าถึง API หลักต้องส่ง header `x-api-key: <your-key>`
@@ -228,13 +242,39 @@ VITE_SOFTNIX_MEMORY_ADMIN_KEY=
 ### เข้าใช้งาน Web UI
 
 1. เปิดเบราว์เซอร์ที่ `http://127.0.0.1:5173`
-2. กรอก task/provider/model แล้วกด `Start Run`
+2. กรอก task แล้วกด `Start Run` (provider/model/max iterations ใช้ค่าจาก backend config)
 3. ดู conversation timeline และใช้ปุ่ม `Cancel`/`Resume` ได้ตรงนี้เลย
 
 ข้อจำกัดปัจจุบันของ Web UI:
 - ยังไม่มีหน้าจัดการ policy admin (reload ยังเรียกผ่าน API)
 
-## Telegram Setup (MVP)
+## Scheduling (Cron-like)
+
+รองรับการตั้งเวลางานล่วงหน้าแบบ one-time และ recurring
+
+ตัวอย่างแปลงข้อความธรรมชาติ:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/schedules/parse \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"วันนี้ 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI","timezone":"Asia/Bangkok"}'
+```
+
+ตัวอย่างสร้าง schedule จากข้อความธรรมชาติโดยตรง:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/schedules/from-text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"ทุกวัน 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI","timezone":"Asia/Bangkok"}'
+```
+
+ตัวอย่างสั่งรันทันที (run-now):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/schedules/<schedule_id>/run-now
+```
+
+## Telegram Setup
 
 หัวข้อนี้ออกแบบสำหรับ dev local ที่ยังไม่มี public server โดยใช้ `ngrok` เพื่อเปิด webhook
 
@@ -272,7 +312,7 @@ SOFTNIX_TELEGRAM_MAX_TASK_CHARS=2000
 ```
 
 หมายเหตุ:
-- ค่า `<RANDOM_SECRET>` หรือ placeholder ต้องเปลี่ยนเป็น secret จริงก่อนใช้งาน
+- ค่า placeholder ต้องเปลี่ยนเป็น secret จริงก่อนใช้งาน
 - ถ้ามีหลาย chat ให้คั่น comma เช่น `8388377631,-1001122334455`
 
 ### D) เปิด backend + ngrok
@@ -315,6 +355,11 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 ส่งข้อความใน Telegram:
 - `/help`
 - `/run สรุปเว็บไซต์ https://www.softnix.co.th/softnix-logger/`
+- `/schedule ทุกวัน 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI`
+- `/schedules`
+- `/schedule_runs <schedule_id>`
+- `/schedule_disable <schedule_id>`
+- `/schedule_delete <schedule_id>`
 - `/status <run_id>`
 - `/cancel <run_id>`
 - `/resume <run_id>`
@@ -323,6 +368,29 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - bot จะตอบ `Started run: <run_id>` ทันที
 - เมื่อ run จบ bot จะส่ง final summary ของสถานะ (`completed|failed|canceled`)
 - ถ้ามี artifacts ระบบจะส่งไฟล์ล่าสุดกลับ Telegram อัตโนมัติ (สูงสุด 3 ไฟล์)
+
+พฤติกรรมหลัง `/schedule`:
+- bot จะสร้าง schedule ให้ทันที และตอบ `Schedule created: <schedule_id>`
+- สำหรับงาน recurring ระบบ scheduler จะสร้าง run อัตโนมัติตามเวลา
+- หาก schedule ตั้ง `delivery_channel=telegram` ระบบจะส่ง final summary/artifacts กลับ Telegram อัตโนมัติเมื่อ run จบ
+
+หมายเหตุสำคัญ:
+- ถ้าต้องการให้ schedule ทำงานอัตโนมัติ ต้องเปิด `SOFTNIX_SCHEDULER_ENABLED=true` และ restart backend
+
+### Quick E2E (Telegram Schedule)
+
+1. ตั้งค่าใน `.env`:
+- `SOFTNIX_TELEGRAM_ENABLED=true`
+- `SOFTNIX_TELEGRAM_MODE=webhook`
+- `SOFTNIX_SCHEDULER_ENABLED=true`
+
+2. restart backend + เปิด ngrok + set webhook
+
+3. ทดสอบใน Telegram:
+- `/schedule ทุกวัน 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI`
+- `/schedules`
+- `/schedule_runs <schedule_id>`
+- รอเวลารันจริงเพื่อรับ final summary + artifacts กลับใน chat เดิม
 
 ### G) Troubleshooting ที่พบบ่อย
 

@@ -9,7 +9,19 @@ class TelegramCommand:
     arg: str
 
 
-SUPPORTED_COMMANDS = {"run", "status", "cancel", "resume", "pending", "help"}
+SUPPORTED_COMMANDS = {
+    "run",
+    "schedule",
+    "schedules",
+    "schedule_runs",
+    "schedule_disable",
+    "schedule_delete",
+    "status",
+    "cancel",
+    "resume",
+    "pending",
+    "help",
+}
 
 
 def parse_telegram_command(text: str) -> TelegramCommand | None:
@@ -25,4 +37,3 @@ def parse_telegram_command(text: str) -> TelegramCommand | None:
     if name not in SUPPORTED_COMMANDS:
         return TelegramCommand(name="help", arg="")
     return TelegramCommand(name=name, arg=arg)
-
