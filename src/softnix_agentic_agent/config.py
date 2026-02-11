@@ -42,8 +42,14 @@ class Settings:
     exec_container_cache_dir: Path = Path(".softnix/container-cache")
     exec_container_pip_cache_enabled: bool = True
     exec_container_env_vars: list[str] = None  # type: ignore[assignment]
+    exec_container_run_venv_enabled: bool = True
+    exec_container_auto_install_enabled: bool = True
+    exec_container_auto_install_max_modules: int = 6
     max_action_output_chars: int = 12000
     no_progress_repeat_threshold: int = 3
+    run_max_wall_time_sec: int = 900
+    planner_parse_error_streak_threshold: int = 3
+    capability_failure_streak_threshold: int = 4
     web_fetch_tls_verify: bool = True
     memory_profile_file: str = "memory/PROFILE.md"
     memory_session_file: str = "memory/SESSION.md"
@@ -163,8 +169,22 @@ def load_settings() -> Settings:
         exec_container_pip_cache_enabled=os.getenv("SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED", "true").lower()
         in {"1", "true", "yes", "on"},
         exec_container_env_vars=_parse_csv(os.getenv("SOFTNIX_EXEC_CONTAINER_ENV_VARS", "RESEND_API_KEY")),
+        exec_container_run_venv_enabled=os.getenv("SOFTNIX_EXEC_CONTAINER_RUN_VENV_ENABLED", "true").lower()
+        in {"1", "true", "yes", "on"},
+        exec_container_auto_install_enabled=os.getenv("SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_ENABLED", "true").lower()
+        in {"1", "true", "yes", "on"},
+        exec_container_auto_install_max_modules=int(
+            os.getenv("SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES", "6")
+        ),
         max_action_output_chars=int(os.getenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", "12000")),
         no_progress_repeat_threshold=int(os.getenv("SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD", "3")),
+        run_max_wall_time_sec=int(os.getenv("SOFTNIX_RUN_MAX_WALL_TIME_SEC", "900")),
+        planner_parse_error_streak_threshold=int(
+            os.getenv("SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD", "3")
+        ),
+        capability_failure_streak_threshold=int(
+            os.getenv("SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD", "4")
+        ),
         web_fetch_tls_verify=os.getenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", "true").lower()
         in {"1", "true", "yes", "on"},
         memory_profile_file=os.getenv("SOFTNIX_MEMORY_PROFILE_FILE", "memory/PROFILE.md"),

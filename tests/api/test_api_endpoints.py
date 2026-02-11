@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import re
 
 from fastapi.testclient import TestClient
@@ -397,3 +398,41 @@ def test_memory_admin_key_control_plane_rotate_revoke_and_audit(monkeypatch, tmp
     actions = [item.get("action") for item in audit.json()["items"]]
     assert "rotate_key" in actions
     assert "revoke_key" in actions
+
+
+def test_upload_file_to_workspace(monkeypatch, tmp_path: Path) -> None:
+    from softnix_agentic_agent.api import app as app_module
+
+    settings = Settings(runs_dir=tmp_path / "runs", workspace=tmp_path, skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    monkeypatch.setattr(app_module, "_settings", settings)
+    monkeypatch.setattr(app_module, "_store", store)
+    monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
+
+    client = TestClient(app_module.app)
+
+    upload = client.post(
+        "/files/upload",
+        json={
+            "filename": "sample.pdf",
+            "content_base64": base64.b64encode(b"%PDF-1.4\nhello").decode("ascii"),
+            "path": "docs/input/sample.pdf",
+        },
+    )
+    assert upload.status_code == 200
+    assert upload.json()["status"] == "uploaded"
+    assert upload.json()["path"] == "docs/input/sample.pdf"
+    assert (tmp_path / "docs" / "input" / "sample.pdf").exists()
+
+    blocked = client.post(
+        "/files/upload",
+        json={
+            "filename": "evil.pdf",
+            "content_base64": base64.b64encode(b"x").decode("ascii"),
+            "path": "../evil.pdf",
+        },
+    )
+    assert blocked.status_code == 400
+    assert "escapes workspace" in blocked.json()["detail"]

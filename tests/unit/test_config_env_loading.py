@@ -70,8 +70,14 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_EXEC_CONTAINER_CACHE_DIR=.softnix/test-cache\n"
         "SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=false\n"
         "SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY,OPENAI_API_KEY\n"
+        "SOFTNIX_EXEC_CONTAINER_RUN_VENV_ENABLED=true\n"
+        "SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_ENABLED=true\n"
+        "SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES=8\n"
         "SOFTNIX_MAX_ACTION_OUTPUT_CHARS=5000\n"
         "SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD=4\n"
+        "SOFTNIX_RUN_MAX_WALL_TIME_SEC=1200\n"
+        "SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD=5\n"
+        "SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD=6\n"
         "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n",
         encoding="utf-8",
     )
@@ -95,8 +101,14 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_CACHE_DIR", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED", raising=False)
     monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_ENV_VARS", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_RUN_VENV_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES", raising=False)
     monkeypatch.delenv("SOFTNIX_MAX_ACTION_OUTPUT_CHARS", raising=False)
     monkeypatch.delenv("SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD", raising=False)
+    monkeypatch.delenv("SOFTNIX_RUN_MAX_WALL_TIME_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD", raising=False)
+    monkeypatch.delenv("SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
 
     settings = load_settings()
@@ -118,8 +130,14 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert str(settings.exec_container_cache_dir) == ".softnix/test-cache"
     assert settings.exec_container_pip_cache_enabled is False
     assert settings.exec_container_env_vars == ["RESEND_API_KEY", "OPENAI_API_KEY"]
+    assert settings.exec_container_run_venv_enabled is True
+    assert settings.exec_container_auto_install_enabled is True
+    assert settings.exec_container_auto_install_max_modules == 8
     assert settings.max_action_output_chars == 5000
     assert settings.no_progress_repeat_threshold == 4
+    assert settings.run_max_wall_time_sec == 1200
+    assert settings.planner_parse_error_streak_threshold == 5
+    assert settings.capability_failure_streak_threshold == 6
     assert settings.web_fetch_tls_verify is False
 
 

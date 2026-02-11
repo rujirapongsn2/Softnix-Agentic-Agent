@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import re
@@ -19,6 +21,7 @@ class SafeActionExecutor:
         self,
         workspace: Path,
         safe_commands: list[str],
+        runs_dir: Path | None = None,
         command_timeout_sec: int = 30,
         exec_runtime: str = "host",
         exec_container_lifecycle: str = "per_action",
@@ -30,11 +33,15 @@ class SafeActionExecutor:
         exec_container_cache_dir: Path | None = None,
         exec_container_pip_cache_enabled: bool = True,
         exec_container_env_vars: list[str] | None = None,
+        exec_container_run_venv_enabled: bool = True,
+        exec_container_auto_install_enabled: bool = True,
+        exec_container_auto_install_max_modules: int = 6,
         run_id: str = "",
         max_output_chars: int = 12000,
         web_fetch_tls_verify: bool = True,
     ) -> None:
         self.workspace = workspace.resolve()
+        self.runs_dir = Path(runs_dir).resolve() if runs_dir is not None else None
         self.safe_commands = safe_commands
         self.command_timeout_sec = command_timeout_sec
         runtime = (exec_runtime or "host").strip().lower()
@@ -54,6 +61,9 @@ class SafeActionExecutor:
         self.exec_container_cache_dir = Path(cache_dir).resolve()
         self.exec_container_pip_cache_enabled = bool(exec_container_pip_cache_enabled)
         self.exec_container_env_vars = [str(x).strip() for x in (exec_container_env_vars or []) if str(x).strip()]
+        self.exec_container_run_venv_enabled = bool(exec_container_run_venv_enabled)
+        self.exec_container_auto_install_enabled = bool(exec_container_auto_install_enabled)
+        self.exec_container_auto_install_max_modules = max(1, int(exec_container_auto_install_max_modules))
         if self.exec_container_pip_cache_enabled:
             self.exec_container_cache_dir.mkdir(parents=True, exist_ok=True)
         self.run_id = (run_id or "").strip()
@@ -61,6 +71,25 @@ class SafeActionExecutor:
         self._container_name = self._build_container_name(self.run_id)
         self.max_output_chars = max_output_chars
         self.web_fetch_tls_verify = bool(web_fetch_tls_verify)
+        run_scope = self.run_id or "runtime"
+        self._runtime_workspace_rel_dir = Path(".softnix") / "runtime-envs" / run_scope
+        self._runtime_workspace_dir = self.workspace / self._runtime_workspace_rel_dir
+        self._runtime_venv_rel_dir = self._runtime_workspace_rel_dir / "venv"
+        self._runtime_venv_rel_python = self._runtime_venv_rel_dir / "bin" / "python"
+        self._runtime_venv_dir = self.workspace / self._runtime_venv_rel_dir
+        self._runtime_venv_python = self.workspace / self._runtime_venv_rel_python
+        self._runtime_venv_ready = False
+        self._auto_install_attempted_modules: set[str] = set()
+        self._auto_install_succeeded_modules: set[str] = set()
+        self._auto_install_attempts_log: list[dict[str, Any]] = []
+        runtime_dir = self._runtime_workspace_dir / "metadata"
+        if self.runs_dir is not None and self.run_id:
+            runtime_dir = self.runs_dir / self.run_id / "runtime"
+        self._runtime_metadata_dir = runtime_dir
+        self._runtime_metadata_dir.mkdir(parents=True, exist_ok=True)
+        self._runtime_manifest_path = self._runtime_metadata_dir / "runtime_manifest.json"
+        self._runtime_requirements_lock_path = self._runtime_metadata_dir / "requirements.lock"
+        self._persist_runtime_manifest()
 
     def execute(self, action: dict[str, Any]) -> ActionResult:
         name = action.get("name", "")
@@ -146,6 +175,7 @@ class SafeActionExecutor:
                 raise ValueError("args must be a list")
             parts.extend(str(x) for x in raw_args)
         parts = self._normalize_python_command_alias(parts)
+        parts = self._normalize_pip_command_alias(parts)
         base = parts[0]
         if base not in self.safe_commands:
             raise ValueError(f"Command is not allowlisted: {base}")
@@ -156,7 +186,11 @@ class SafeActionExecutor:
             parts = self._hydrate_rm_targets(parts, params)
             self._validate_rm_paths(parts)
 
-        proc = self._run_subprocess(parts)
+        command_parts = self._replace_python_base_with_runtime_venv(parts)
+        proc = self._run_python_with_auto_install_if_needed(
+            command_parts=command_parts,
+            original_base=base,
+        )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
 
@@ -268,8 +302,33 @@ class SafeActionExecutor:
             raise ValueError(f"Script file not found: {script_path}")
 
         command_parts = [python_bin, str(script_path), *args]
-        proc = self._run_subprocess(command_parts)
-        output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+        command_parts = self._replace_python_base_with_runtime_venv(command_parts)
+        proc = self._run_python_with_auto_install_if_needed(
+            command_parts=command_parts,
+            original_base=python_bin,
+        )
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        output_file, stdout_file, stderr_file, append_mode = self._parse_command_redirect_targets(params)
+        written_paths: list[str] = []
+        if output_file:
+            combined = stdout + (("\n" + stderr) if stderr else "")
+            self._write_command_output_file(output_file, combined, append_mode=append_mode)
+            written_paths.append(output_file)
+        else:
+            if stdout_file:
+                self._write_command_output_file(stdout_file, stdout, append_mode=append_mode)
+                written_paths.append(stdout_file)
+            if stderr_file:
+                self._write_command_output_file(stderr_file, stderr, append_mode=append_mode)
+                written_paths.append(stderr_file)
+
+        raw_output = stdout + ("\n" + stderr if stderr else "")
+        output = self._truncate_output(raw_output)
+        if written_paths:
+            lines = [f"redirected output: {p}" for p in written_paths]
+            suffix = "\n".join(lines)
+            output = f"{output.strip()}\n{suffix}".strip() if output.strip() else suffix
         if proc.returncode != 0:
             return ActionResult(name="run_python_code", ok=False, output=output, error=f"exit_code={proc.returncode}")
         return ActionResult(name="run_python_code", ok=True, output=output.strip())
@@ -289,6 +348,160 @@ class SafeActionExecutor:
         if "python" in self.safe_commands:
             return "python"
         return raw
+
+    def _normalize_pip_command_alias(self, parts: list[str]) -> list[str]:
+        if not parts:
+            return parts
+        if parts[0] != "pip":
+            return parts
+        if "python" not in self.safe_commands:
+            return parts
+        return ["python", "-m", "pip", *parts[1:]]
+
+    def _replace_python_base_with_runtime_venv(self, parts: list[str]) -> list[str]:
+        if not parts:
+            return parts
+        if not self._should_use_runtime_venv_for_python(parts[0]):
+            return parts
+        self._ensure_runtime_venv_ready()
+        return [str(self._runtime_venv_rel_python), *parts[1:]]
+
+    def _should_use_runtime_venv_for_python(self, base: str) -> bool:
+        if self.exec_runtime != "container":
+            return False
+        if not self.exec_container_run_venv_enabled:
+            return False
+        normalized = self._normalize_python_bin_alias(base)
+        return normalized == "python"
+
+    def _ensure_runtime_venv_ready(self) -> None:
+        if self.exec_runtime != "container" or not self.exec_container_run_venv_enabled:
+            return
+        if self._runtime_venv_ready and self._runtime_venv_python.exists():
+            return
+        if self._runtime_venv_python.exists():
+            self._runtime_venv_ready = True
+            self._persist_runtime_manifest()
+            return
+        self._runtime_workspace_dir.mkdir(parents=True, exist_ok=True)
+        proc = self._run_subprocess(["python", "-m", "venv", str(self._runtime_venv_rel_dir)])
+        if proc.returncode != 0:
+            output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+            raise RuntimeError(f"failed to create runtime venv: {output}")
+        self._runtime_venv_ready = True
+        self._persist_runtime_manifest()
+        self._refresh_runtime_requirements_lock()
+
+    def _run_python_with_auto_install_if_needed(
+        self,
+        command_parts: list[str],
+        original_base: str,
+    ) -> subprocess.CompletedProcess[str]:
+        proc = self._run_subprocess(command_parts)
+        if not self._can_attempt_auto_install(original_base):
+            return proc
+
+        retries = 0
+        while proc.returncode != 0 and retries < self.exec_container_auto_install_max_modules:
+            module = self._extract_missing_module_from_output((proc.stderr or "") + "\n" + (proc.stdout or ""))
+            if not module:
+                break
+            package = module.split(".", 1)[0].strip()
+            if not package or package in self._auto_install_attempted_modules:
+                break
+            self._auto_install_attempted_modules.add(package)
+            ok = self._install_python_package(package)
+            retries += 1
+            if not ok:
+                break
+            proc = self._run_subprocess(command_parts)
+        return proc
+
+    def _can_attempt_auto_install(self, base: str) -> bool:
+        if self.exec_runtime != "container":
+            return False
+        if not self.exec_container_auto_install_enabled:
+            return False
+        normalized = self._normalize_python_bin_alias(base)
+        return normalized == "python"
+
+    def _extract_missing_module_from_output(self, text: str) -> str:
+        source = text or ""
+        patterns = [
+            r"No module named ['\"]([^'\"]+)['\"]",
+            r"ModuleNotFoundError:\s+No module named ['\"]([^'\"]+)['\"]",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, source)
+            if not match:
+                continue
+            module = str(match.group(1)).strip()
+            if module and re.match(r"^[A-Za-z0-9_.-]+$", module):
+                return module
+        return ""
+
+    def _install_python_package(self, package: str) -> bool:
+        self._ensure_runtime_venv_ready()
+        command = [str(self._runtime_venv_python), "-m", "pip", "install", package]
+        proc = self._run_subprocess(command)
+        output = self._truncate_output((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "package": package,
+            "ok": proc.returncode == 0,
+            "output": output,
+        }
+        self._auto_install_attempts_log.append(entry)
+        if proc.returncode == 0:
+            self._auto_install_succeeded_modules.add(package)
+            self._refresh_runtime_requirements_lock()
+        self._persist_runtime_manifest()
+        return proc.returncode == 0
+
+    def _refresh_runtime_requirements_lock(self) -> None:
+        if self.exec_runtime != "container":
+            return
+        if not self._runtime_venv_python.exists():
+            return
+        proc = self._run_subprocess([str(self._runtime_venv_python), "-m", "pip", "freeze"])
+        if proc.returncode != 0:
+            return
+        self._runtime_requirements_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._runtime_requirements_lock_path.write_text(proc.stdout or "", encoding="utf-8")
+
+    def _persist_runtime_manifest(self) -> None:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": self.run_id,
+            "runtime": self.exec_runtime,
+            "container": {
+                "image": self.exec_container_image,
+                "lifecycle": self.exec_container_lifecycle,
+                "network": self.exec_container_network,
+                "pip_cache_enabled": self.exec_container_pip_cache_enabled,
+                "pip_cache_dir": str(self.exec_container_cache_dir),
+                "run_scoped_venv_enabled": self.exec_container_run_venv_enabled,
+                "auto_install_enabled": self.exec_container_auto_install_enabled,
+                "auto_install_max_modules": self.exec_container_auto_install_max_modules,
+            },
+            "venv": {
+                "relative_path": str(self._runtime_venv_rel_dir),
+                "path": str(self._runtime_venv_dir),
+                "python_relative": str(self._runtime_venv_rel_python),
+                "python": str(self._runtime_venv_python),
+                "ready": self._runtime_venv_ready or self._runtime_venv_python.exists(),
+            },
+            "auto_install": {
+                "attempted_modules": sorted(self._auto_install_attempted_modules),
+                "installed_modules": sorted(self._auto_install_succeeded_modules),
+                "attempts": self._auto_install_attempts_log,
+            },
+        }
+        self._runtime_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self._runtime_manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _validate_rm_paths(self, parts: list[str]) -> None:
         if len(parts) < 2:
@@ -458,6 +671,7 @@ class SafeActionExecutor:
         self._container_started = True
 
     def shutdown(self) -> None:
+        self._persist_runtime_manifest()
         if not self._container_started:
             return
         subprocess.run(

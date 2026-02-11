@@ -220,6 +220,11 @@ export function App() {
   });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadPath, setUploadPath] = useState("inputs/");
+  const [uploadPending, setUploadPending] = useState(false);
+  const [uploadInfo, setUploadInfo] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactDownloadingPath, setArtifactDownloadingPath] = useState<string | null>(null);
@@ -487,6 +492,31 @@ export function App() {
     }
   }
 
+  async function onUploadWorkspaceFile() {
+    if (!uploadFile) {
+      setUploadError("Please choose a file");
+      return;
+    }
+    try {
+      setUploadPending(true);
+      setUploadError(null);
+      const cleanedPath = uploadPath.trim();
+      const fullPath = cleanedPath.endsWith("/") ? `${cleanedPath}${uploadFile.name}` : cleanedPath;
+      const uploaded = await apiClient.uploadWorkspaceFile(uploadFile, fullPath || uploadFile.name);
+      setUploadInfo(`uploaded: ${uploaded.path} (${formatBytes(uploaded.size)})`);
+      setTask((prev) => {
+        const next = prev.trim();
+        if (!next) return `อ่านไฟล์ ${uploaded.path} แล้ว extract เฉพาะข้อมูลที่ต้องการ`;
+        if (next.includes(uploaded.path)) return prev;
+        return `${prev}\nไฟล์อ้างอิง: ${uploaded.path}`;
+      });
+    } catch (e) {
+      setUploadError((e as Error).message);
+    } finally {
+      setUploadPending(false);
+    }
+  }
+
   async function onCancelRun() {
     if (!selectedRunId) return;
     await apiClient.cancelRun(selectedRunId);
@@ -571,6 +601,30 @@ export function App() {
                 onChange={(e) => setTask(e.target.value)}
                 placeholder="Describe your objective, expected output files, and constraints..."
               />
+              <div className="rounded-md border border-border bg-secondary/40 p-2">
+                <div className="mb-2 text-[11px] text-muted-foreground">Upload file to workspace</div>
+                <input
+                  className="mb-2 block w-full text-xs"
+                  type="file"
+                  onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                />
+                <Input
+                  value={uploadPath}
+                  onChange={(e) => setUploadPath(e.target.value)}
+                  placeholder="target path, e.g. inputs/"
+                />
+                <Button
+                  variant="secondary"
+                  className="mt-2 w-full"
+                  onClick={onUploadWorkspaceFile}
+                  disabled={uploadPending}
+                >
+                  {uploadPending ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  Upload
+                </Button>
+                {uploadInfo ? <div className="mt-2 text-[11px] text-muted-foreground">{uploadInfo}</div> : null}
+                {uploadError ? <div className="mt-2 text-[11px] text-red-600">{uploadError}</div> : null}
+              </div>
               <div className="text-[11px] text-muted-foreground">
                 Runtime defaults are auto-loaded from backend config (.env).
               </div>

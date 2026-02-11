@@ -122,7 +122,13 @@ pip install -e '.[dev]'
 - `SOFTNIX_EXEC_CONTAINER_MEMORY` จำกัด memory สำหรับ container runtime
 - `SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT` จำกัดจำนวน process ภายใน container
 - `SOFTNIX_EXEC_CONTAINER_ENV_VARS` allowlist env vars ที่จะส่งเข้า container runtime (comma-separated, default `RESEND_API_KEY`)
+- `SOFTNIX_EXEC_CONTAINER_RUN_VENV_ENABLED` เปิด run-scoped virtualenv ใน container runtime (default `true`)
+- `SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_ENABLED` เปิด auto-install dependency เมื่อเจอ `ModuleNotFoundError` ใน container runtime (default `true`)
+- `SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES` จำกัดจำนวน module ที่ระบบ auto-install ต่อ action (default `6`)
 - `SOFTNIX_MAX_ACTION_OUTPUT_CHARS` จำกัดขนาด output ต่อ action
+- `SOFTNIX_RUN_MAX_WALL_TIME_SEC` จำกัดเวลารวมต่อ run (second) เพื่อกันงานวนไม่จบ (default `900`)
+- `SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD` จำนวนครั้งติดกันของ `planner_parse_error` ก่อนหยุด (default `3`)
+- `SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD` จำนวนครั้งติดกันของ capability failure เดิมก่อนหยุด (default `4`)
 - `SOFTNIX_WEB_FETCH_TLS_VERIFY` เปิด/ปิด TLS certificate verification สำหรับ `web_fetch` (default `true`)
 - `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `memory/PROFILE.md`)
 - `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `memory/SESSION.md`)
@@ -537,6 +543,9 @@ SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT=256
 SOFTNIX_EXEC_CONTAINER_CACHE_DIR=.softnix/container-cache
 SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED=true
 SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY
+SOFTNIX_EXEC_CONTAINER_RUN_VENV_ENABLED=true
+SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_ENABLED=true
+SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES=6
 ```
 
 หมายเหตุ:
@@ -550,6 +559,9 @@ SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY
   - `softnix/runtime-ml:py311` (เพิ่ม scikit-learn/matplotlib และ `resend`)
 - โหมด `per_run` จะสร้าง container หนึ่งตัวต่อ run แล้วใช้ `docker exec` สำหรับ action ถัดไป เพื่อลด overhead และคง dependency ระหว่าง action ใน run เดียวกัน
 - รองรับ pip dependency cache ข้าม run ผ่าน mount path `SOFTNIX_EXEC_CONTAINER_CACHE_DIR` (เปิด/ปิดด้วย `SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED`)
+- รองรับ run-scoped virtualenv ที่ `/workspace/.softnix/runtime-envs/<run_id>/venv` (เปิด/ปิดด้วย `SOFTNIX_EXEC_CONTAINER_RUN_VENV_ENABLED`)
+- เมื่อรัน Python แล้วเจอ `ModuleNotFoundError` ระบบสามารถ auto-install package แล้ว retry ให้ใน run เดียวกัน (เปิด/ปิดด้วย `SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_ENABLED`, จำกัดจำนวนด้วย `SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES`)
+- ระบบบันทึก runtime metadata ต่อ run ที่ `.softnix/runs/<run_id>/runtime/runtime_manifest.json` และ snapshot dependency ที่ `.softnix/runs/<run_id>/runtime/requirements.lock`
 - รองรับ env passthrough แบบ allowlist เพื่อส่ง secret ที่จำเป็นเข้า runtime เช่น `RESEND_API_KEY` ผ่าน `SOFTNIX_EXEC_CONTAINER_ENV_VARS`
 - รองรับ image profile strategy:
   - `auto`: เลือก profile จาก task/skills (`scraping|ml|qa|web|data|base`) อัตโนมัติ
@@ -593,6 +605,9 @@ SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY
 
 - ระบบตรวจลูปซ้ำที่ไม่เกิดความคืบหน้า (plan/actions/results/output ซ้ำกันหลายรอบ)
 - หากเกิน threshold (`SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD`, default `3`) จะหยุด run ด้วย `stop_reason=no_progress`
+- หากเกิด `planner_parse_error` ต่อเนื่องเกิน threshold (`SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD`) จะหยุด run ด้วย `stop_reason=no_progress`
+- หากเกิด capability failure เดิมซ้ำ (เช่น missing module/binary, allowlist block) เกิน threshold (`SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD`) จะหยุด run ด้วย `stop_reason=no_progress`
+- หากเวลารวมเกิน `SOFTNIX_RUN_MAX_WALL_TIME_SEC` ระบบจะหยุด run เพื่อป้องกันงานค้างยาว
 - event จะระบุ `signature=<hash>` และ `actions=<...>` เพื่อช่วย debug root cause ใน timeline
 - ช่วยลดการวนจน `max_iters` โดยไม่คืบหน้า
 

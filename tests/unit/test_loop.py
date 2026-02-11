@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import itertools
 
 from softnix_agentic_agent.agent.loop import AgentLoopRunner
 from softnix_agentic_agent.agent.planner import Planner
@@ -18,6 +19,17 @@ class FakeProvider(LLMProvider):
         item = self.outputs[min(self.i, len(self.outputs) - 1)]
         self.i += 1
         return LLMResponse(content=json.dumps(item), usage={"total_tokens": 1})
+
+    def healthcheck(self) -> ProviderStatus:
+        return ProviderStatus(ok=True, message="ok")
+
+
+class BrokenJSONProvider(LLMProvider):
+    def __init__(self, content: str = "{") -> None:
+        self.content = content
+
+    def generate(self, messages, model, tools=None, temperature=0.2, max_tokens=1024):  # type: ignore[override]
+        return LLMResponse(content=self.content, usage={"total_tokens": 1})
 
     def healthcheck(self) -> ProviderStatus:
         return ProviderStatus(ok=True, message="ok")
@@ -970,6 +982,103 @@ def test_loop_stops_with_no_progress_before_max_iters(tmp_path: Path) -> None:
     assert state.iteration < 10
     events = store.read_events(state.run_id)
     assert any("stopped: no_progress detected" in e and "signature=" in e for e in events)
+
+
+def test_loop_stops_on_repeated_planner_parse_error(tmp_path: Path) -> None:
+    provider = BrokenJSONProvider(content="{invalid")
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        planner_parse_error_streak_threshold=2,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="force parse failures",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=10,
+    )
+
+    assert state.stop_reason == StopReason.NO_PROGRESS
+    assert state.status == RunStatus.FAILED
+    assert state.iteration < 10
+    assert "planner_parse_error" in state.last_output
+    events = store.read_events(state.run_id)
+    assert any("stopped: planner_parse_error streak=" in e for e in events)
+
+
+def test_loop_stops_on_repeated_capability_failure(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [{"name": "run_shell_command", "params": {"command": "pip", "args": ["install", "x"]}}],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        capability_failure_streak_threshold=2,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="trigger repeated blocked command",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=10,
+    )
+
+    assert state.stop_reason == StopReason.NO_PROGRESS
+    assert state.status == RunStatus.FAILED
+    assert state.iteration < 10
+    assert "capability block" in state.last_output
+    events = store.read_events(state.run_id)
+    assert any("stopped: capability_block repeated=" in e for e in events)
+
+
+def test_loop_stops_on_run_wall_time_limit(tmp_path: Path, monkeypatch) -> None:
+    provider = FakeProvider(outputs=[{"done": False, "actions": [{"name": "list_dir", "params": {"path": "."}}]}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        run_max_wall_time_sec=2,
+        no_progress_repeat_threshold=100,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    ticks = itertools.count(start=0, step=3)
+    monkeypatch.setattr("softnix_agentic_agent.agent.loop.time.monotonic", lambda: float(next(ticks)))
+
+    state = runner.start_run(
+        task="long run guard",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=50,
+    )
+
+    assert state.stop_reason == StopReason.NO_PROGRESS
+    assert state.status == RunStatus.FAILED
+    assert "wall time limit" in state.last_output
+    events = store.read_events(state.run_id)
+    assert any("stopped: wall_time_limit reached" in e for e in events)
 
 
 def test_loop_list_dir_output_does_not_snapshot_unrelated_existing_files(tmp_path: Path) -> None:

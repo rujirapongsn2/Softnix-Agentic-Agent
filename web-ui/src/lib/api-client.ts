@@ -137,6 +137,29 @@ export const apiClient = {
     return request("/system/config");
   },
 
+  async uploadWorkspaceFile(file: File, path?: string): Promise<{ status: string; path: string; size: number }> {
+    const authHeaders: Record<string, string> = API_KEY ? { "x-api-key": API_KEY } : {};
+    const contentBase64 = await fileToBase64(file);
+    const targetPath = (path ?? "").trim();
+    const res = await fetch(`${API_BASE}/files/upload`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders
+      },
+      body: JSON.stringify({
+        filename: file.name,
+        content_base64: contentBase64,
+        path: targetPath || undefined
+      })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    return (await res.json()) as { status: string; path: string; size: number };
+  },
+
   hasMemoryAdminKey(): boolean {
     return Boolean(MEMORY_ADMIN_KEY);
   },
@@ -150,6 +173,15 @@ export const apiClient = {
     });
   }
 };
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
 
 export function streamRun(
   runId: string,

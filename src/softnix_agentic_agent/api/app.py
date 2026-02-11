@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,6 +90,12 @@ class AdminRevokeKeyRequest(BaseModel):
     reason: str = ""
 
 
+class FileUploadRequest(BaseModel):
+    filename: str
+    content_base64: str
+    path: str | None = None
+
+
 app = FastAPI(title="Softnix Agentic Agent API", version="0.1.0")
 _settings = load_settings()
 _store = FilesystemStore(_settings.runs_dir)
@@ -110,6 +117,24 @@ app.add_middleware(
 
 def _is_public_path(path: str) -> bool:
     return path in {"/health", "/docs", "/redoc", "/openapi.json", "/telegram/webhook"}
+
+
+def _is_within_workspace(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(_settings.workspace.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_upload_target(raw_path: str) -> Path:
+    candidate = (raw_path or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="path is required")
+    target = (_settings.workspace / candidate).resolve()
+    if not _is_within_workspace(target):
+        raise HTTPException(status_code=400, detail="path escapes workspace")
+    return target
 
 
 @app.middleware("http")
@@ -321,6 +346,23 @@ def create_run(payload: RunCreateRequest) -> dict:
     _threads[state.run_id] = t
     t.start()
     return {"run_id": state.run_id, "status": "started", "workspace": str(_settings.workspace)}
+
+
+@app.post("/files/upload")
+def upload_file_to_workspace(payload: FileUploadRequest) -> dict:
+    filename = payload.filename.strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="file name is required")
+    target_raw = (payload.path or "").strip() or filename
+    target = _resolve_upload_target(target_raw)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = base64.b64decode(payload.content_base64, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid content_base64") from exc
+    target.write_bytes(data)
+    rel = str(target.relative_to(_settings.workspace.resolve()))
+    return {"status": "uploaded", "path": rel, "size": len(data)}
 
 
 @app.get("/runs")
@@ -1009,6 +1051,9 @@ def system_config() -> dict:
         "exec_container_pids_limit": _settings.exec_container_pids_limit,
         "exec_container_cache_dir": str(_settings.exec_container_cache_dir),
         "exec_container_pip_cache_enabled": _settings.exec_container_pip_cache_enabled,
+        "exec_container_run_venv_enabled": _settings.exec_container_run_venv_enabled,
+        "exec_container_auto_install_enabled": _settings.exec_container_auto_install_enabled,
+        "exec_container_auto_install_max_modules": _settings.exec_container_auto_install_max_modules,
         "memory_policy_path": str(_settings.memory_policy_path),
         "memory_profile_file": _settings.memory_profile_file,
         "memory_session_file": _settings.memory_session_file,
@@ -1016,6 +1061,9 @@ def system_config() -> dict:
         "memory_inferred_min_confidence": _settings.memory_inferred_min_confidence,
         "memory_pending_alert_threshold": _settings.memory_pending_alert_threshold,
         "no_progress_repeat_threshold": _settings.no_progress_repeat_threshold,
+        "run_max_wall_time_sec": _settings.run_max_wall_time_sec,
+        "planner_parse_error_streak_threshold": _settings.planner_parse_error_streak_threshold,
+        "capability_failure_streak_threshold": _settings.capability_failure_streak_threshold,
         "memory_admin_configured": admin.is_configured(),
         "memory_admin_keys_path": str(_settings.memory_admin_keys_path),
         "memory_admin_audit_path": str(_settings.memory_admin_audit_path),

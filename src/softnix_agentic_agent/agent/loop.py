@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shlex
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,7 @@ class AgentLoopRunner:
 
         executor = SafeActionExecutor(
             workspace=Path(state.workspace),
+            runs_dir=self.settings.runs_dir,
             safe_commands=self.settings.safe_commands,
             command_timeout_sec=self.settings.exec_timeout_sec,
             exec_runtime=self.settings.exec_runtime,
@@ -114,6 +116,9 @@ class AgentLoopRunner:
             exec_container_cache_dir=self.settings.exec_container_cache_dir,
             exec_container_pip_cache_enabled=self.settings.exec_container_pip_cache_enabled,
             exec_container_env_vars=self.settings.exec_container_env_vars,
+            exec_container_run_venv_enabled=self.settings.exec_container_run_venv_enabled,
+            exec_container_auto_install_enabled=self.settings.exec_container_auto_install_enabled,
+            exec_container_auto_install_max_modules=self.settings.exec_container_auto_install_max_modules,
             run_id=state.run_id,
             max_output_chars=self.settings.max_action_output_chars,
             web_fetch_tls_verify=self.settings.web_fetch_tls_verify,
@@ -122,6 +127,10 @@ class AgentLoopRunner:
         repeated_iteration_count = 0
         produced_files_in_run: set[str] = set()
         previous_iteration_had_failed_action = False
+        run_started_at = time.monotonic()
+        planner_parse_error_streak = 0
+        capability_failure_streak = 0
+        previous_capability_failure_fingerprint = ""
 
         try:
             if state.iteration == 0:
@@ -138,6 +147,25 @@ class AgentLoopRunner:
                     self.store.log_event(state.run_id, f"memory staged entries={len(memory_staged)}")
 
             while state.iteration < state.max_iters:
+                max_wall_sec = max(0, int(self.settings.run_max_wall_time_sec))
+                if max_wall_sec > 0:
+                    elapsed = int(max(0.0, time.monotonic() - run_started_at))
+                    if elapsed >= max_wall_sec:
+                        state.status = RunStatus.FAILED
+                        state.stop_reason = StopReason.NO_PROGRESS
+                        state.last_output = (
+                            "stopped by wall time limit "
+                            f"(elapsed={elapsed}s, limit={max_wall_sec}s); "
+                            "adjust SOFTNIX_RUN_MAX_WALL_TIME_SEC if needed"
+                        )
+                        state.updated_at = utc_now_iso()
+                        self.store.write_state(state)
+                        self.store.log_event(
+                            state.run_id,
+                            f"stopped: wall_time_limit reached elapsed={elapsed}s limit={max_wall_sec}s",
+                        )
+                        return state
+
                 try:
                     compact_stats = memory.compact(["profile", "session"])
                     if compact_stats["removed_expired"] or compact_stats["removed_duplicates"]:
@@ -178,6 +206,27 @@ class AgentLoopRunner:
                     skills_context=skills_context,
                     memory_context=memory_context,
                 )
+                if self._is_planner_parse_error(plan):
+                    planner_parse_error_streak += 1
+                else:
+                    planner_parse_error_streak = 0
+
+                parse_guard_threshold = max(2, int(self.settings.planner_parse_error_streak_threshold))
+                if planner_parse_error_streak >= parse_guard_threshold:
+                    state.status = RunStatus.FAILED
+                    state.stop_reason = StopReason.NO_PROGRESS
+                    state.last_output = (
+                        "stopped: repeated planner_parse_error "
+                        f"(streak={planner_parse_error_streak}); "
+                        "model output could not be parsed as valid JSON plan"
+                    )
+                    state.updated_at = utc_now_iso()
+                    self.store.write_state(state)
+                    self.store.log_event(
+                        state.run_id,
+                        f"stopped: planner_parse_error streak={planner_parse_error_streak}",
+                    )
+                    return state
 
                 actions = plan.get("actions", []) if isinstance(plan.get("actions", []), list) else []
                 action_results = []
@@ -339,6 +388,34 @@ class AgentLoopRunner:
 
                 self.store.write_state(state)
                 previous_iteration_had_failed_action = has_failed_action
+
+                failure_fingerprint = self._build_capability_failure_fingerprint(action_results)
+                if failure_fingerprint:
+                    if failure_fingerprint == previous_capability_failure_fingerprint:
+                        capability_failure_streak += 1
+                    else:
+                        capability_failure_streak = 1
+                        previous_capability_failure_fingerprint = failure_fingerprint
+                else:
+                    capability_failure_streak = 0
+                    previous_capability_failure_fingerprint = ""
+
+                capability_guard_threshold = max(2, int(self.settings.capability_failure_streak_threshold))
+                if capability_failure_streak >= capability_guard_threshold:
+                    state.status = RunStatus.FAILED
+                    state.stop_reason = StopReason.NO_PROGRESS
+                    state.last_output = (
+                        "stopped: repeated capability block "
+                        f"(streak={capability_failure_streak}, fingerprint={failure_fingerprint})"
+                    )
+                    state.updated_at = utc_now_iso()
+                    self.store.write_state(state)
+                    self.store.log_event(
+                        state.run_id,
+                        "stopped: capability_block repeated="
+                        f"{capability_failure_streak} fingerprint={failure_fingerprint}",
+                    )
+                    return state
 
                 current_sig = self._build_iteration_signature(actions=actions, action_results=action_results, output=output)
                 if current_sig == previous_iteration_signature:
@@ -547,6 +624,56 @@ class AgentLoopRunner:
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _is_planner_parse_error(self, plan: dict[str, Any]) -> bool:
+        if not isinstance(plan, dict):
+            return False
+        text = str(plan.get("final_output", "")).lower()
+        if "planner_parse_error" not in text:
+            return False
+        actions = plan.get("actions", [])
+        return not actions
+
+    def _build_capability_failure_fingerprint(self, action_results: list[dict[str, Any]]) -> str:
+        signals: list[str] = []
+        for item in action_results:
+            if bool(item.get("ok", False)):
+                continue
+            blob = (str(item.get("error", "")) + "\n" + str(item.get("output", ""))).strip().lower()
+            if not blob:
+                continue
+            matched = False
+
+            missing_module = re.search(r"no module named ['\"]?([a-z0-9_.-]+)['\"]?", blob)
+            if missing_module:
+                signals.append(f"missing_module:{missing_module.group(1)}")
+                matched = True
+
+            missing_bin = re.search(r"no such file or directory: ['\"]?([a-z0-9_.-]+)['\"]?", blob)
+            if missing_bin:
+                signals.append(f"missing_binary:{missing_bin.group(1)}")
+                matched = True
+
+            allowlist = re.search(r"command is not allowlisted:\s*([a-z0-9_.-]+)", blob)
+            if allowlist:
+                signals.append(f"blocked_command:{allowlist.group(1)}")
+                matched = True
+
+            if "certificate verify failed" in blob or "ssl:" in blob:
+                signals.append("network_tls")
+                matched = True
+
+            if "planner_parse_error" in blob:
+                signals.append("planner_parse_error")
+                matched = True
+
+            if not matched:
+                signals.append(blob[:120])
+
+        if not signals:
+            return ""
+        uniq = sorted(set(signals))
+        return ",".join(uniq)
 
     def _prepare_action(
         self,

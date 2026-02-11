@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 
@@ -351,3 +352,98 @@ def test_run_safe_command_rejects_non_list_args(tmp_path: Path) -> None:
     )
     assert result.ok is False
     assert "args must be a list" in (result.error or "")
+
+
+def test_run_safe_command_accepts_pip_alias_when_python_allowlisted(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run(parts, cwd, text, capture_output, timeout, check):  # type: ignore[no-untyped-def]
+        captured["parts"] = [str(x) for x in parts]
+        return subprocess.CompletedProcess(args=parts, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["python"])
+    result = ex.execute(
+        {
+            "name": "run_safe_command",
+            "params": {"command": "pip", "args": ["install", "humanize"]},
+        }
+    )
+    assert result.ok is True
+    assert captured["parts"][:4] == ["python", "-m", "pip", "install"]
+
+
+def test_run_python_code_supports_stdout_path(tmp_path: Path) -> None:
+    ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["python"])
+    result = ex.execute(
+        {
+            "name": "run_python_code",
+            "params": {
+                "code": "print('hello-stdout')\n",
+                "stdout_path": "result.txt",
+            },
+        }
+    )
+    assert result.ok is True
+    assert (tmp_path / "result.txt").read_text(encoding="utf-8").strip() == "hello-stdout"
+    assert "redirected output: result.txt" in result.output
+
+
+def test_container_runtime_auto_installs_missing_module_and_writes_runtime_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[list[str]] = []
+    script_runs = {"count": 0}
+
+    def _fake_run(parts, cwd, text, capture_output, timeout, check):  # type: ignore[no-untyped-def]
+        cmd = [str(x) for x in parts]
+        calls.append(cmd)
+        joined = " ".join(cmd)
+
+        if cmd[:2] == ["docker", "run"] and "-d" in cmd:
+            return subprocess.CompletedProcess(args=parts, returncode=0, stdout="cid", stderr="")
+        if "-m venv" in joined:
+            return subprocess.CompletedProcess(args=parts, returncode=0, stdout="", stderr="")
+        if "-m pip freeze" in joined:
+            return subprocess.CompletedProcess(args=parts, returncode=0, stdout="humanize==4.0\n", stderr="")
+        if "-m pip install humanize" in joined:
+            return subprocess.CompletedProcess(args=parts, returncode=0, stdout="installed", stderr="")
+        if "script_" in joined and ".py" in joined:
+            script_runs["count"] += 1
+            if script_runs["count"] == 1:
+                return subprocess.CompletedProcess(
+                    args=parts,
+                    returncode=1,
+                    stdout="",
+                    stderr="ModuleNotFoundError: No module named 'humanize'",
+                )
+            return subprocess.CompletedProcess(args=parts, returncode=0, stdout="ok\n", stderr="")
+        return subprocess.CompletedProcess(args=parts, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    runs_dir = tmp_path / "runs"
+    ex = SafeActionExecutor(
+        workspace=tmp_path,
+        safe_commands=["python"],
+        runs_dir=runs_dir,
+        exec_runtime="container",
+        exec_container_lifecycle="per_run",
+        exec_container_image="python:3.11-slim",
+        run_id="run-auto-install",
+    )
+    ex._runtime_venv_python.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
+    ex._runtime_venv_python.write_text("", encoding="utf-8")  # type: ignore[attr-defined]
+    result = ex.execute({"name": "run_python_code", "params": {"code": "import humanize\nprint('ok')\n"}})
+    ex.shutdown()
+
+    assert result.ok is True
+    assert "ok" in result.output
+    assert any("-m pip install humanize" in " ".join(cmd) for cmd in calls)
+
+    manifest_path = runs_dir / "run-auto-install" / "runtime" / "runtime_manifest.json"
+    lock_path = runs_dir / "run-auto-install" / "runtime" / "requirements.lock"
+    assert manifest_path.exists() is True
+    assert lock_path.exists() is True
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "humanize" in manifest["auto_install"]["installed_modules"]
+    assert "humanize==4.0" in lock_path.read_text(encoding="utf-8")
