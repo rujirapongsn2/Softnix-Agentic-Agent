@@ -7,10 +7,17 @@ import json
 import os
 from pathlib import Path
 import re
+import ssl
 import subprocess
 import sys
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+
+def _parse_bool(value: str | None, default: bool = True) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 def _decide_web_fallback(
     extracted_text: str,
@@ -71,7 +78,32 @@ def _clean_html_to_text(html: str) -> str:
     return text.strip()
 
 
-def _fetch_html(url: str, timeout_sec: int) -> str:
+def _build_ssl_context(tls_verify: bool) -> ssl.SSLContext:
+    if not tls_verify:
+        return ssl._create_unverified_context()  # nosec B323 - explicit fallback for cert-chain issues
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+
+        ctx.load_verify_locations(cafile=certifi.where())
+    except Exception:
+        # Keep default trust store if certifi is unavailable.
+        pass
+    return ctx
+
+
+def _is_cert_verify_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "certificate_verify_failed",
+        "unable to get local issuer certificate",
+        "self signed certificate",
+        "certificate verify failed",
+    )
+    return any(m in text for m in markers)
+
+
+def _fetch_html(url: str, timeout_sec: int, tls_verify: bool = True) -> str:
     req = Request(
         url=url,
         headers={
@@ -81,7 +113,8 @@ def _fetch_html(url: str, timeout_sec: int) -> str:
             )
         },
     )
-    with urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - intended URL fetch adapter
+    ctx = _build_ssl_context(tls_verify=tls_verify)
+    with urlopen(req, timeout=timeout_sec, context=ctx) as resp:  # nosec B310 - intended URL fetch adapter
         raw = resp.read()
         charset = resp.headers.get_content_charset() or "utf-8"
     return raw.decode(charset, errors="replace")
@@ -122,6 +155,12 @@ def main() -> int:
         action="store_true",
         help="Attempt browser command via SOFTNIX_WEB_INTEL_BROWSER_CMD_TEMPLATE when fetch is insufficient",
     )
+    parser.add_argument(
+        "--tls-verify",
+        choices=("true", "false"),
+        default=os.getenv("SOFTNIX_WEB_INTEL_TLS_VERIFY", "true"),
+        help="Verify TLS certificates for direct fetch (default from SOFTNIX_WEB_INTEL_TLS_VERIFY)",
+    )
     args = parser.parse_args()
 
     parsed = urlparse(args.url)
@@ -146,16 +185,36 @@ def main() -> int:
         "fallback_attempted": False,
         "fallback_reason": "",
         "browser_command_used": "",
+        "tls_verify_requested": _parse_bool(args.tls_verify, default=True),
+        "tls_verify_effective": _parse_bool(args.tls_verify, default=True),
+        "tls_verify_downgraded": False,
     }
 
     try:
-        html = _fetch_html(args.url, timeout_sec=max(1, args.timeout_sec))
+        html = _fetch_html(
+            args.url,
+            timeout_sec=max(1, args.timeout_sec),
+            tls_verify=bool(meta["tls_verify_effective"]),
+        )
     except Exception as exc:
-        meta.update({"status": "fetch_error", "error": str(exc)})
-        _write(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
-        _write(summary_path, f"# Web Intel Summary\n\n- status: fetch_error\n- error: {exc}\n")
-        print(f"error=fetch_failed {exc}", file=sys.stderr)
-        return 1
+        if bool(meta["tls_verify_requested"]) and _is_cert_verify_error(exc):
+            try:
+                html = _fetch_html(args.url, timeout_sec=max(1, args.timeout_sec), tls_verify=False)
+                meta["tls_verify_effective"] = False
+                meta["tls_verify_downgraded"] = True
+                meta["tls_downgrade_reason"] = "cert_verify_failed"
+            except Exception as exc2:
+                meta.update({"status": "fetch_error", "error": str(exc2)})
+                _write(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
+                _write(summary_path, f"# Web Intel Summary\n\n- status: fetch_error\n- error: {exc2}\n")
+                print(f"error=fetch_failed {exc2}", file=sys.stderr)
+                return 1
+        else:
+            meta.update({"status": "fetch_error", "error": str(exc)})
+            _write(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
+            _write(summary_path, f"# Web Intel Summary\n\n- status: fetch_error\n- error: {exc}\n")
+            print(f"error=fetch_failed {exc}", file=sys.stderr)
+            return 1
 
     _write(raw_path, html)
     extracted = _clean_html_to_text(html)

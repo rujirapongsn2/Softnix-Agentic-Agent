@@ -763,6 +763,12 @@ class AgentLoopRunner:
             text = (task or "").lower()
             skill_names = [str(getattr(s, "name", "")).lower() for s in selected_skills]
             if (
+                any(tok in text for tok in {"email", "e-mail", "mail", "resend"})
+                or any(("sendmail" in name or "mail" in name) for name in skill_names)
+            ):
+                # Sendmail skill needs third-party package(s) not present in python:slim.
+                profile = "data"
+            elif (
                 any(tok in text for tok in {"selenium", "playwright", "beautifulsoup", "scrape", "crawler"})
                 or any(("scrap" in name or "crawl" in name) for name in skill_names)
             ):
@@ -860,6 +866,33 @@ class AgentLoopRunner:
                 if not self._python_file_imports_module(content, module):
                     failures.append(f"module not imported in {path_text}: {module}")
                 continue
+            if ctype in {"json_key_exists", "json_key_equals"}:
+                if not target.exists() or not target.is_file():
+                    failures.append(f"missing output file: {path_text}")
+                    continue
+                key = str(check.get("key", "")).strip()
+                if not key:
+                    failures.append(f"validation missing key for {path_text}")
+                    continue
+                try:
+                    payload = json.loads(target.read_text(encoding="utf-8"))
+                except Exception:
+                    failures.append(f"invalid json in {path_text}")
+                    continue
+                if not isinstance(payload, dict):
+                    failures.append(f"json root is not object in {path_text}")
+                    continue
+                if key not in payload:
+                    failures.append(f"json key not found in {path_text}: {key}")
+                    continue
+                if ctype == "json_key_equals":
+                    expected = str(check.get("value", ""))
+                    actual = str(payload.get(key))
+                    if actual != expected:
+                        failures.append(
+                            f"json key mismatch in {path_text}: {key} expected={expected!r} actual={actual!r}"
+                        )
+                continue
             failures.append(f"unknown validation type: {ctype}")
 
         return {"ok": len(failures) == 0, "failures": failures, "checks": checks}
@@ -880,12 +913,24 @@ class AgentLoopRunner:
                 path = str(item.get("path", "")).strip()
                 contains = str(item.get("contains", ""))
                 module = str(item.get("module", "")).strip()
-                if ctype in {"file_exists", "text_in_file", "python_import"} and path:
+                key = str(item.get("key", "")).strip()
+                value = str(item.get("value", ""))
+                if ctype in {
+                    "file_exists",
+                    "text_in_file",
+                    "python_import",
+                    "json_key_exists",
+                    "json_key_equals",
+                } and path:
                     payload = {"type": ctype, "path": path}
                     if ctype == "text_in_file":
                         payload["contains"] = contains
                     if ctype == "python_import":
                         payload["module"] = module
+                    if ctype in {"json_key_exists", "json_key_equals"}:
+                        payload["key"] = key
+                    if ctype == "json_key_equals":
+                        payload["value"] = value
                     checks.append(payload)
 
         inferred_files = self._infer_output_files_from_task(task)
@@ -915,8 +960,21 @@ class AgentLoopRunner:
             has_meta = ("web_intel/meta.json" in inferred_files) or ("web_intel/meta.json" in lowered_task)
             has_summary = ("web_intel/summary.md" in inferred_files) or ("web_intel/summary.md" in lowered_task)
             if has_meta:
-                checks.append({"type": "text_in_file", "path": "web_intel/meta.json", "contains": '"generated_by": "web_intel_fetch.py"'})
-                checks.append({"type": "text_in_file", "path": "web_intel/meta.json", "contains": '"timestamp": "'})
+                checks.append(
+                    {
+                        "type": "json_key_equals",
+                        "path": "web_intel/meta.json",
+                        "key": "generated_by",
+                        "value": "web_intel_fetch.py",
+                    }
+                )
+                checks.append(
+                    {
+                        "type": "json_key_exists",
+                        "path": "web_intel/meta.json",
+                        "key": "timestamp",
+                    }
+                )
             if has_summary:
                 checks.append({"type": "text_in_file", "path": "web_intel/summary.md", "contains": "# Web Intel Summary"})
 
@@ -929,6 +987,8 @@ class AgentLoopRunner:
                 item.get("path", ""),
                 item.get("contains", ""),
                 item.get("module", ""),
+                item.get("key", ""),
+                item.get("value", ""),
             )
             if sig in seen:
                 continue
@@ -970,6 +1030,7 @@ class AgentLoopRunner:
         text = (task or "").strip()
         if not text:
             return []
+        is_web_intel_task = self._task_requires_web_intel_contract(task)
         intent_keywords = (
             "write",
             "create",
@@ -982,7 +1043,7 @@ class AgentLoopRunner:
             "เขียนลง",
         )
         lowered = text.lower()
-        if not any(k in lowered for k in intent_keywords):
+        if not any(k in lowered for k in intent_keywords) and not is_web_intel_task:
             return []
 
         candidates = re.findall(r"([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)", text)
@@ -993,11 +1054,18 @@ class AgentLoopRunner:
             if token.count(".") > 1 and "/" not in token:
                 # likely domain name, not workspace file
                 continue
+            # Skill scripts referenced as command inputs (e.g. "python skillpacks/.../*.py")
+            # are not output artifacts for objective validation.
+            if token.endswith(".py") and self._looks_like_skill_script_input_ref(text, token):
+                continue
             if token.startswith("./"):
                 token = token[2:]
             if token.startswith("/"):
                 continue
             files.append(token)
+
+        if is_web_intel_task:
+            files.extend(["web_intel/summary.md", "web_intel/meta.json"])
 
         seen = set()
         uniq: list[str] = []
@@ -1007,6 +1075,17 @@ class AgentLoopRunner:
             seen.add(f)
             uniq.append(f)
         return uniq
+
+    def _looks_like_skill_script_input_ref(self, task: str, token: str) -> bool:
+        lowered_token = (token or "").strip().lower().replace("\\", "/")
+        if not lowered_token:
+            return False
+        if lowered_token.startswith(("skillpacks/", "examples/skills/", ".softnix_skill_exec/")):
+            return True
+        escaped = re.escape(token)
+        if re.search(rf"(?:^|\s)python(?:3)?\s+{escaped}(?:\s|$)", task, flags=re.IGNORECASE):
+            return True
+        return False
 
     def _task_requires_web_intel_contract(self, task: str) -> bool:
         lowered = (task or "").lower()

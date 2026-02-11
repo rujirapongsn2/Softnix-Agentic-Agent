@@ -125,7 +125,7 @@ def test_loop_blocks_action_by_policy_allow_tools(tmp_path: Path) -> None:
         max_iters=1,
     )
 
-    assert state.stop_reason == StopReason.COMPLETED
+    assert state.stop_reason == StopReason.MAX_ITERS
     assert (tmp_path / "x.txt").exists() is False
 
     iterations = store.read_iterations(state.run_id)

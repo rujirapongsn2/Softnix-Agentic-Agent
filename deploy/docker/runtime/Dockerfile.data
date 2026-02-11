@@ -10,5 +10,5 @@ RUN python -m pip install --upgrade pip \
         scipy \
         requests \
         beautifulsoup4 \
-        lxml
-
+        lxml \
+        resend

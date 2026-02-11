@@ -546,8 +546,8 @@ SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY
   ./scripts/build_runtime_images.sh
   ```
   script นี้จะ build:
-  - `softnix/runtime-data:py311` (มี numpy/pandas/scipy และ web parsing libs)
-  - `softnix/runtime-ml:py311` (เพิ่ม scikit-learn/matplotlib)
+  - `softnix/runtime-data:py311` (มี numpy/pandas/scipy, web parsing libs, และ `resend`)
+  - `softnix/runtime-ml:py311` (เพิ่ม scikit-learn/matplotlib และ `resend`)
 - โหมด `per_run` จะสร้าง container หนึ่งตัวต่อ run แล้วใช้ `docker exec` สำหรับ action ถัดไป เพื่อลด overhead และคง dependency ระหว่าง action ใน run เดียวกัน
 - รองรับ pip dependency cache ข้าม run ผ่าน mount path `SOFTNIX_EXEC_CONTAINER_CACHE_DIR` (เปิด/ปิดด้วย `SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED`)
 - รองรับ env passthrough แบบ allowlist เพื่อส่ง secret ที่จำเป็นเข้า runtime เช่น `RESEND_API_KEY` ผ่าน `SOFTNIX_EXEC_CONTAINER_ENV_VARS`
@@ -561,6 +561,9 @@ SOFTNIX_EXEC_CONTAINER_ENV_VARS=RESEND_API_KEY
     - `SOFTNIX_EXEC_CONTAINER_IMAGE_SCRAPING`
     - `SOFTNIX_EXEC_CONTAINER_IMAGE_ML`
     - `SOFTNIX_EXEC_CONTAINER_IMAGE_QA`
+- ถ้าต้องการ behavior ใกล้ host มากที่สุด แนะนำ preset:
+  - `BASE/WEB/DATA/SCRAPING/QA = softnix/runtime-data:py311`
+  - `ML = softnix/runtime-ml:py311`
 - action `web_fetch` ยังเป็น HTTP client ของ backend process (ไม่รันใน container runtime)
 
 ความหมายของ `SOFTNIX_EXEC_CONTAINER_LIFECYCLE`:

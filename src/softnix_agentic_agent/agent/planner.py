@@ -5,6 +5,8 @@ from typing import Any
 
 from softnix_agentic_agent.providers.base import LLMProvider
 
+MAX_PREVIOUS_OUTPUT_CHARS = 4000
+
 
 SYSTEM_PROMPT = """
 You are Softnix Agent Planner.
@@ -74,10 +76,11 @@ class Planner:
         skills_context: str,
         memory_context: str = "",
     ) -> tuple[dict[str, Any], dict[str, int], str]:
+        compact_previous_output = _compact_previous_output(previous_output, max_chars=MAX_PREVIOUS_OUTPUT_CHARS)
         user_prompt = (
             f"Task: {task}\n"
             f"Iteration: {iteration}/{max_iters}\n"
-            f"Previous output: {previous_output or 'N/A'}\n"
+            f"Previous output: {compact_previous_output or 'N/A'}\n"
             f"Memory:\n{memory_context or '- none'}\n"
             f"Skills:\n{skills_context}\n"
             "Return JSON plan now."
@@ -121,3 +124,16 @@ def _strip_code_fence(content: str) -> str:
             lines = lines[:-1]
         return "\n".join(lines).strip()
     return content
+
+
+def _compact_previous_output(text: str, max_chars: int = MAX_PREVIOUS_OUTPUT_CHARS) -> str:
+    raw = (text or "").strip()
+    if len(raw) <= max_chars:
+        return raw
+    keep_head = max(200, int(max_chars * 0.8))
+    keep_tail = max(120, max_chars - keep_head)
+    head = raw[:keep_head].rstrip()
+    tail = raw[-keep_tail:].lstrip()
+    return (
+        f"{head}\n\n[truncated previous output: showing first {keep_head} and last {keep_tail} chars]\n\n{tail}"
+    )

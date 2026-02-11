@@ -192,7 +192,7 @@ def test_loop_run_python_code_out_dir_files_are_snapshotted_as_artifacts(tmp_pat
                                 "d = Path(a.out_dir)\n"
                                 "d.mkdir(parents=True, exist_ok=True)\n"
                                 "(d / 'summary.md').write_text('# Web Intel Summary\\n', encoding='utf-8')\n"
-                                "(d / 'meta.json').write_text('{\"generated_by\":\"web_intel_fetch.py\"}\\n', encoding='utf-8')\n"
+                                "(d / 'meta.json').write_text('{\"generated_by\":\"web_intel_fetch.py\",\"timestamp\":\"2026-02-11T00:00:00+00:00\"}\\n', encoding='utf-8')\n"
                                 "print('done')\n"
                             ),
                             "args": ["--out-dir", "web_intel"],
@@ -326,6 +326,84 @@ def test_loop_objective_validation_accepts_valid_file_exists_check(tmp_path: Pat
 
     assert state.stop_reason == StopReason.COMPLETED
     assert (tmp_path / "result.txt").exists() is True
+
+
+def test_loop_objective_validation_accepts_json_key_checks(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "meta.json",
+                            "content": '{"generated_by":"web_intel_fetch.py","timestamp":"2026-02-11T00:00:00+00:00"}\n',
+                        },
+                    }
+                ],
+                "validations": [
+                    {"type": "json_key_equals", "path": "meta.json", "key": "generated_by", "value": "web_intel_fetch.py"},
+                    {"type": "json_key_exists", "path": "meta.json", "key": "timestamp"},
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="validate json contract",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+
+
+def test_loop_objective_validation_blocks_when_json_key_equals_mismatch(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "meta.json",
+                            "content": '{"generated_by":"manual","timestamp":"2026-02-11T00:00:00+00:00"}\n',
+                        },
+                    }
+                ],
+                "validations": [
+                    {"type": "json_key_equals", "path": "meta.json", "key": "generated_by", "value": "web_intel_fetch.py"}
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="validate json mismatch",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "json key mismatch in meta.json: generated_by" in state.last_output
 
 
 def test_loop_objective_validation_blocks_done_when_task_requires_numpy_but_script_missing_import(
@@ -498,7 +576,7 @@ def test_loop_blocks_done_when_web_intel_contract_markers_missing(tmp_path: Path
     )
 
     assert state.stop_reason == StopReason.MAX_ITERS
-    assert "text not found in web_intel/meta.json: \"generated_by\": \"web_intel_fetch.py\"" in state.last_output
+    assert "json key not found in web_intel/meta.json: generated_by" in state.last_output
 
 
 def test_loop_blocks_done_when_web_intel_files_not_produced_in_current_run(tmp_path: Path) -> None:
@@ -538,6 +616,118 @@ def test_loop_blocks_done_when_web_intel_files_not_produced_in_current_run(tmp_p
 
     assert state.stop_reason == StopReason.MAX_ITERS
     assert "required web_intel output not produced in this run: web_intel/meta.json" in state.last_output
+
+
+def test_loop_auto_completes_web_intel_outputs_even_when_done_false(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "web_intel/summary.md", "content": "# Web Intel Summary\nok\n"},
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "web_intel/meta.json",
+                            "content": '{"generated_by":"web_intel_fetch.py","timestamp":"2026-02-11T00:00:00+00:00"}\n',
+                        },
+                    },
+                ],
+                "final_output": "",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task=(
+            "ช่วยสรุปข้อมูลแบบ fetch-first และอ่าน web_intel/summary.md กับ web_intel/meta.json "
+            "ก่อนสรุปผล"
+        ),
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=3,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.iteration == 1
+    artifacts = set(store.list_artifacts(state.run_id))
+    assert "web_intel/summary.md" in artifacts
+    assert "web_intel/meta.json" in artifacts
+
+
+def test_loop_infer_output_files_excludes_skill_script_input_path(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    task = (
+        "ช่วยสรุปแบบ fetch-first: รัน python skillpacks/web-intel/scripts/web_intel_fetch.py "
+        "--url \"https://www.softnix.ai\" --task-hint \"สรุปข้อมูลสินค้าและข่าว AI\" --out-dir \"web_intel\" "
+        "แล้วอ่าน web_intel/summary.md และ web_intel/meta.json"
+    )
+    inferred = runner._infer_output_files_from_task(task)
+
+    assert "skillpacks/web-intel/scripts/web_intel_fetch.py" not in inferred
+    assert "web_intel/summary.md" in inferred
+    assert "web_intel/meta.json" in inferred
+
+
+def test_loop_auto_complete_web_intel_task_with_skill_script_path_in_prompt(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "web_intel/summary.md", "content": "# Web Intel Summary\nok\n"},
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "web_intel/meta.json",
+                            "content": '{"generated_by":"web_intel_fetch.py","timestamp":"2026-02-11T00:00:00+00:00"}\n',
+                        },
+                    },
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    task = (
+        "ช่วยสรุปข้อมูลจาก https://www.softnix.ai ให้ทำแบบ fetch-first: "
+        "ถ้าข้อมูลไม่พอให้รัน python skillpacks/web-intel/scripts/web_intel_fetch.py "
+        "--url \"https://www.softnix.ai\" --task-hint \"สรุปข้อมูลสินค้าและข่าว AI\" --out-dir \"web_intel\" "
+        "แล้วอ่าน web_intel/summary.md และ web_intel/meta.json"
+    )
+    state = runner.start_run(
+        task=task,
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=3,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.iteration == 1
+    events = store.read_events(state.run_id)
+    assert any("objective auto-completed from inferred validations" in e for e in events)
 
 
 def test_loop_normalizes_python3_alias_for_run_python_code(tmp_path: Path) -> None:
@@ -1125,3 +1315,36 @@ def test_loop_logs_container_runtime_profile_auto_qa(tmp_path: Path) -> None:
     assert state.stop_reason == StopReason.COMPLETED
     events = store.read_events(state.run_id)
     assert any("container runtime profile=qa image=img-qa" in e for e in events)
+
+
+def test_loop_logs_container_runtime_profile_auto_data_for_sendmail_task(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        exec_runtime="container",
+        exec_container_image_profile="auto",
+        exec_container_image_base="img-base",
+        exec_container_image_web="img-web",
+        exec_container_image_data="img-data",
+        exec_container_image_scraping="img-scraping",
+        exec_container_image_ml="img-ml",
+        exec_container_image_qa="img-qa",
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ส่งอีเมลผ่าน resend ไปยังทีม",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("container runtime profile=data image=img-data" in e for e in events)

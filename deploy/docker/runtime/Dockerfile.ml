@@ -12,5 +12,5 @@ RUN python -m pip install --upgrade pip \
         matplotlib \
         requests \
         beautifulsoup4 \
-        lxml
-
+        lxml \
+        resend
