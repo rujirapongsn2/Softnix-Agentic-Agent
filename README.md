@@ -33,9 +33,26 @@ flowchart LR
 
     CLI --> API["FastAPI Facade"]
     WEB -->|REST + SSE| API
-    TG -->|Webhook/Poll| API
+    TG -->|Webhook| API
 
-    API --> LOOP["Agent Loop"]
+    API --> RUNAPI["Run API (/runs/*)"]
+    API --> SCHAPI["Schedule API (/schedules/*)"]
+    API --> TGIN["Telegram API (/telegram/*)"]
+    API --> SCHWORKER["Scheduler Worker (background thread)"]
+    API --> ADMIN["Memory Admin Control Plane"]
+
+    RUNAPI --> LOOP["Agent Loop"]
+    SCHWORKER --> SSTORE["Schedule Store (.softnix/schedules)"]
+    SCHWORKER -->|dispatch due schedule| LOOP
+    SCHWORKER -->|notify when done| TGW["Telegram Gateway"]
+
+    SCHAPI --> SSTORE
+    TGIN --> TGW
+    TGW -->|/run| LOOP
+    TGW -->|/schedule,/schedules,/schedule_runs| SSTORE
+    TGW --> TGCLIENT["Telegram Client"]
+    TGCLIENT --> TG
+
     LOOP --> PLAN["Planner"]
     PLAN --> PROVIDERS["LLM Providers (OpenAI/Claude/Custom)"]
     LOOP --> EXEC["Executor (safe actions)"]
@@ -46,10 +63,9 @@ flowchart LR
     MEMORY --> PROFILE["workspace/memory/PROFILE.md"]
     MEMORY --> SESSION["workspace/memory/SESSION.md"]
     MEMORY --> POLICY[".softnix/system/POLICY.md"]
-    ADMIN["Memory Admin Control Plane"] --> POLICY
+    ADMIN --> POLICY
     ADMIN --> ADMINKEYS[".softnix/system/MEMORY_ADMIN_KEYS.json"]
     ADMIN --> AUDIT[".softnix/system/MEMORY_ADMIN_AUDIT.jsonl"]
-    API --> ADMIN
 
     EXEC --> RUNTIME{"Execution Runtime"}
     RUNTIME --> HOST["Host"]
@@ -63,7 +79,7 @@ flowchart LR
     RUNS --> EVENTS["events.log"]
     RUNS --> ARTIFACTS["artifacts/"]
 
-    TG <-->|Run status + artifacts| API
+    TGW -->|run status + artifacts| TG
     WEB -->|Artifacts download| API
 ```
 
