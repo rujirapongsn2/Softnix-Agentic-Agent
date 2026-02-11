@@ -290,6 +290,49 @@ curl -sS -X POST http://127.0.0.1:8787/schedules/from-text \
 curl -sS -X POST http://127.0.0.1:8787/schedules/<schedule_id>/run-now
 ```
 
+## Web Intelligence Fallback Strategy
+
+สำหรับงานค้นหา/สรุปข้อมูลเว็บไซต์ ระบบใช้แนวทาง 2 ชั้น:
+
+1. `web_fetch` ก่อนเสมอ
+- เร็วกว่า ต้นทุนต่ำกว่า และเพียงพอกับเว็บที่ไม่ซับซ้อน
+
+2. fallback ไป browser automation เมื่อข้อมูลไม่พอ
+- ใช้เมื่อเว็บเป็น dynamic/SPA หรือไม่ผ่านเกณฑ์คุณภาพจากผล `web_fetch`
+
+เกณฑ์ fallback ตัวอย่าง:
+- เนื้อหาที่ดึงได้สั้นผิดปกติ
+- ไม่พบข้อมูลหลักที่ task ต้องการ
+- objective validation ไม่ผ่าน
+- โดเมนถูกกำหนดว่า dynamic-heavy
+
+ผลลัพธ์ที่คาดหวัง:
+- ได้ summary ที่แม่นยำขึ้นในเว็บ dynamic
+- มี evidence artifacts สำหรับตรวจสอบย้อนหลัง
+
+สถานะปัจจุบัน (Step 1: Skill-first): ส่งมอบแล้ว
+- เพิ่ม skill: `skillpacks/web-intel/SKILL.md`
+- เพิ่ม adapter script: `skillpacks/web-intel/scripts/web_intel_fetch.py`
+- ใช้งานผ่าน execution path เดิม (`run_safe_command` / `run_python_code`)
+
+ตัวอย่างใช้งาน adapter script:
+
+```bash
+python skillpacks/web-intel/scripts/web_intel_fetch.py \
+  --url "https://www.softnix.ai" \
+  --task-hint "สรุปข้อมูลสินค้าและข่าว AI" \
+  --out-dir "web_intel" \
+  --attempt-browser-fallback
+```
+
+หมายเหตุ:
+- หากต้องการเปิด browser fallback command ให้กำหนด:
+  - `SOFTNIX_WEB_INTEL_BROWSER_CMD_TEMPLATE='agent-browser extract --url "{url}" --out "{out_dir}"'`
+- script จะสร้าง artifacts มาตรฐาน เช่น `web_intel/raw.html`, `web_intel/extracted.txt`, `web_intel/summary.md`, `web_intel/meta.json`
+
+ดูสเปก implementation ฉบับเต็ม:
+- `docs/web-intelligence-fallback-spec.md`
+
 ## Telegram Setup
 
 หัวข้อนี้ออกแบบสำหรับ dev local ที่ยังไม่มี public server โดยใช้ `ngrok` เพื่อเปิด webhook

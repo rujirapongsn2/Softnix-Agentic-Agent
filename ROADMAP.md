@@ -65,7 +65,26 @@
 - ผลลัพธ์: ระบบรองรับงานอัตโนมัติแบบ cron-like ได้ครบวงจร
 - เอกสารอ้างอิงสเปก: `docs/scheduling-spec.md`
 
-5. CI/CD pipeline
+5. Web Intelligence Fallback (web_fetch -> browser automation)
+- เป้าหมาย: ลดเคสสรุปข้อมูลไม่ครบจากเว็บ dynamic โดยเริ่มจาก `web_fetch` ก่อนเสมอ และ fallback ไป browser automation เมื่อข้อมูลไม่พอ
+- ลำดับการ implement:
+  - ขั้นที่ 1: Skill adapter + วิธีเดิม (`run_safe_command`/`run_python_code`) เพื่อส่งมอบเร็ว (เสร็จแล้ว)
+  - ขั้นที่ 2: ค่อยย้ายไป container runtime profile สำหรับ browser tasks ในเฟส hardening
+- หลักการ:
+  - fetch-first: พยายาม `web_fetch` ก่อนเพื่อความเร็ว/ต้นทุนต่ำ
+  - quality gate: หากคุณภาพข้อมูลต่ำกว่าเกณฑ์ (content too short/missing selectors/validation fail) ให้ยกระดับเป็น browser mode
+  - deterministic output: สรุปผลและ evidence กลับมาเป็นไฟล์มาตรฐานใน artifacts
+- งานหลัก (Phase 2: Decision Engine):
+  - เพิ่มเกณฑ์ตัดสินใจ fallback จากผล `web_fetch` (heuristics + objective validation)
+  - เพิ่ม trace/log ว่า fallback เพราะเหตุผลใด เพื่อ debug ได้
+  - เพิ่ม per-domain policy (บังคับ browser สำหรับเว็บที่รู้ว่า dynamic)
+- งานหลัก (Phase 3: Runtime/Hardening):
+  - แยก runtime profile สำหรับ browser tasks (image/deps/cache) และย้ายงาน browser จาก skill-only mode ไป profile นี้
+  - เพิ่ม timeout/retry/circuit-breaker สำหรับ browser flow
+  - เพิ่ม benchmark เทียบ `web_fetch` vs browser fallback (success rate/latency/cost)
+- ผลลัพธ์: ได้ระบบค้นหา/รวบรวมข้อมูลเว็บที่ยืดหยุ่นและแม่นยำขึ้น โดยยังคุมต้นทุนและความปลอดภัย
+
+6. CI/CD pipeline
 - เป้าหมาย: คุมคุณภาพอัตโนมัติทุก PR/Push
 - งานหลัก:
   - backend: `pytest`
@@ -73,7 +92,7 @@
   - deployment: `docker compose config`
 - ผลลัพธ์: ลด regression ก่อน merge
 
-6. Monitoring/alerts for long-running runs
+7. Monitoring/alerts for long-running runs
 - เป้าหมาย: มองเห็นปัญหา run ค้าง/timeout/provider error ได้เร็ว
 - งานหลัก:
   - timeout threshold
@@ -82,7 +101,7 @@
   - alert output (เริ่มจาก log/webhook)
 - ผลลัพธ์: ดูแลระบบง่ายขึ้นและลดเวลาตรวจ incident
 
-7. Authentication model for production
+8. Authentication model for production
 - เป้าหมาย: ยกระดับจาก static API key ไป session/token
 - งานหลัก:
   - token/session lifecycle
@@ -92,7 +111,7 @@
 
 ## P2 (เสริมความแข็งแรง)
 
-8. Security hardening phase 2
+9. Security hardening phase 2
 - เป้าหมาย: เพิ่ม defense-in-depth
 - งานหลัก:
   - rate limiting
@@ -100,7 +119,7 @@
   - request id tracing
 - ผลลัพธ์: สืบสวนปัญหาและป้องกัน abuse ได้ดีขึ้น
 
-9. Release package and runbook
+10. Release package and runbook
 - เป้าหมาย: ทำให้ทีม deploy/operate ได้มาตรฐาน
 - งานหลัก:
   - versioning + changelog
@@ -115,14 +134,15 @@
 - เพิ่ม retry/backoff พร้อม error classification
 - เพิ่ม scheduling metrics + audit events
 
-2. Telegram Gateway Phase 2 (Hardening)
+2. Web Intelligence Fallback (Phase 2: Decision Engine)
+- เพิ่ม quality gate decision engine ใน run flow (ไม่พึ่ง prompt อย่างเดียว)
+- เพิ่ม fallback reason trace/event ให้ตรวจสอบย้อนหลังได้
+- เพิ่ม per-domain dynamic policy + config
+
+3. Telegram Gateway Phase 2 (Hardening)
 - เพิ่ม rate limit / cooldown ต่อ chat เพื่อกัน abuse
 - เพิ่ม idempotency + dedup กัน Telegram update ซ้ำ
 - เพิ่ม audit mapping `telegram_chat_id <-> run_id` พร้อม query/debug endpoint
-
-3. Execution benchmark + observability hardening
-- วัดผล `per_action` vs `per_run` และ image profiles (`base/web/data/ml`) ด้วย task ชุดมาตรฐาน
-- เก็บ metrics: success rate, median duration, iteration count, dependency install time
 
 ## Definition of Done (ทุกหัวข้อ)
 

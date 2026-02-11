@@ -42,6 +42,9 @@ Rules:
   - optional params.path for script path under workspace
   - optional params.args as string array
   - if setting python_bin, use "python" (never "python3")
+  - when executing a skill script from skills context, call `run_python_code` with params.path directly (no subprocess wrapper inside params.code)
+  - for skill script paths, use skill-relative form like `web-intel/scripts/web_intel_fetch.py` (do not prefix with `skillpacks/`)
+  - if output contains `fallback_required=true` from web-intel script, treat as degraded success and continue by reading `web_intel/summary.md` and `web_intel/meta.json` (do not retry the same command unchanged)
 - For run_shell_command / run_safe_command:
   - command base must be allowlisted
   - optional params.args as string array for command arguments

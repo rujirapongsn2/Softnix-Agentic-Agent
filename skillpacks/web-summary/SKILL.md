@@ -12,8 +12,11 @@ description: สรุปเนื้อหาจากเว็บไซต์�
 
 1. ตรวจสอบว่าได้รับ URL แบบ `http/https` ครบถ้วน
 2. ใช้ `web_fetch` เพื่อดึงเนื้อหาเว็บ
-3. ถ้าเนื้อหายาวหรือเป็นหน้า index ให้สรุปเฉพาะสาระสำคัญ
-4. ส่งสรุปแบบโครงสร้างสั้น อ่านง่าย
+3. ถ้าเนื้อหาไม่เพียงพอ (เช่นเว็บ dynamic/ได้ข้อมูลสั้นเกินไป) ให้ใช้ `web-intel` adapter script:
+`python web-intel/scripts/web_intel_fetch.py --url "<url>" --task-hint "<task>" --out-dir "web_intel"`
+4. เมื่อ script รายงาน `fallback_required=true` ให้ถือเป็น degraded success แล้วไปอ่าน `web_intel/summary.md` และ `web_intel/meta.json` ต่อทันที (ไม่รันคำสั่งเดิมซ้ำ)
+5. ถ้าเนื้อหายาวหรือเป็นหน้า index ให้สรุปเฉพาะสาระสำคัญ
+6. ส่งสรุปแบบโครงสร้างสั้น อ่านง่าย
 
 ## Output Format (default)
 

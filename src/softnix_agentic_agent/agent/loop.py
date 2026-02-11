@@ -276,6 +276,7 @@ class AgentLoopRunner:
                         task=state.task,
                         plan=plan,
                         workspace=Path(state.workspace),
+                        produced_files=produced_files_in_run,
                     )
                     plan["validation"] = validation_report
                     if not validation_report["ok"]:
@@ -412,6 +413,8 @@ class AgentLoopRunner:
                 action_name in {"write_workspace_file", "write_file"} or result_name == "write_workspace_file"
             ):
                 candidate_paths.append(str(raw_path))
+            if action_name == "run_python_code" or result_name == "run_python_code":
+                candidate_paths.extend(self._extract_python_output_targets(params=params, workspace=workspace))
 
             output = str(result.get("output") or "")
             if output and (action_name in output_extract_actions or result_name in output_extract_actions):
@@ -427,6 +430,75 @@ class AgentLoopRunner:
                 except Exception as exc:
                     self.store.log_event(state.run_id, f"artifact snapshot failed: {exc}")
         return snapshotted
+
+    def _extract_python_output_targets(self, params: dict[str, Any], workspace: Path) -> list[str]:
+        raw_candidates: list[str] = []
+
+        def _append_raw(value: Any) -> None:
+            text = str(value or "").strip()
+            if text:
+                raw_candidates.append(text)
+
+        args = params.get("args")
+        if isinstance(args, list):
+            dir_flags = {"--out-dir", "--output-dir", "--artifact-dir", "--artifacts-dir"}
+            path_flags = {"--output", "--out", "--out-file", "--result-file", "--summary-path", "--meta-path"}
+            i = 0
+            while i < len(args):
+                token = str(args[i]).strip()
+                if not token:
+                    i += 1
+                    continue
+                flag, sep, value = token.partition("=")
+                if sep and flag in dir_flags.union(path_flags):
+                    _append_raw(value)
+                    i += 1
+                    continue
+                if token in dir_flags.union(path_flags):
+                    if i + 1 < len(args):
+                        _append_raw(args[i + 1])
+                    i += 2
+                    continue
+                i += 1
+
+        for key in (
+            "out_dir",
+            "output_dir",
+            "artifact_dir",
+            "artifacts_dir",
+            "output",
+            "out",
+            "out_file",
+            "result_file",
+            "summary_path",
+            "meta_path",
+        ):
+            if key in params:
+                _append_raw(params.get(key))
+
+        root = workspace.resolve()
+        expanded: list[str] = []
+        for raw in raw_candidates:
+            probe = Path(raw)
+            candidate = probe.resolve() if probe.is_absolute() else (root / probe).resolve()
+            if not self._is_within_root(candidate, root):
+                continue
+            if candidate.is_file():
+                expanded.append(str(candidate.relative_to(root)))
+                continue
+            if candidate.is_dir():
+                for child in sorted(candidate.rglob("*")):
+                    if child.is_file():
+                        expanded.append(str(child.relative_to(root)))
+
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for item in expanded:
+            if item in seen:
+                continue
+            seen.add(item)
+            uniq.append(item)
+        return uniq
 
     def _evaluate_auto_complete_validations(
         self,
@@ -525,6 +597,11 @@ class AgentLoopRunner:
                 rel = skill_script.relative_to(skills_root.resolve())
                 params["path"] = str(Path(".softnix_skill_exec") / rel)
                 params["code"] = skill_script.read_text(encoding="utf-8")
+                params["skill_source_path"] = str(skill_script)
+            else:
+                code_text = str(params.get("code", ""))
+                if code_text.strip():
+                    params["code"] = self._rewrite_embedded_skill_script_refs(code_text, skills_root)
             return prepared
 
         return prepared
@@ -629,6 +706,49 @@ class AgentLoopRunner:
                 return candidate
         return None
 
+    def _rewrite_embedded_skill_script_refs(self, code: str, skills_root: Path) -> str:
+        pattern = re.compile(r"(?P<q>['\"])(?P<path>[^'\"]+?\.py)(?P=q)")
+        replacements: dict[str, str] = {}
+        embedded_files: dict[str, str] = {}
+
+        for match in pattern.finditer(code):
+            raw_path = match.group("path")
+            if raw_path in replacements:
+                continue
+            resolved = self._resolve_skill_script_path(raw_path, skills_root)
+            if resolved is None or resolved.suffix != ".py":
+                continue
+            rel = resolved.relative_to(skills_root.resolve())
+            exec_rel = str(Path(".softnix_skill_exec") / rel).replace("\\", "/")
+            replacements[raw_path] = exec_rel
+            embedded_files[exec_rel] = resolved.read_text(encoding="utf-8")
+
+        if not replacements:
+            return code
+
+        rewritten = code
+        for src, dst in replacements.items():
+            rewritten = rewritten.replace(f"'{src}'", repr(dst))
+            rewritten = rewritten.replace(f'"{src}"', repr(dst))
+
+        prelude_lines = [
+            "from pathlib import Path as __softnix_Path",
+            "__softnix_skill_files = {",
+        ]
+        for path, content in embedded_files.items():
+            prelude_lines.append(f"    {repr(path)}: {repr(content)},")
+        prelude_lines.extend(
+            [
+                "}",
+                "for __p, __c in __softnix_skill_files.items():",
+                "    __t = __softnix_Path(__p)",
+                "    __t.parent.mkdir(parents=True, exist_ok=True)",
+                "    __t.write_text(__c, encoding='utf-8')",
+                "",
+            ]
+        )
+        return "\n".join(prelude_lines) + rewritten
+
     def _resolve_container_runtime_image(self, task: str, selected_skills: list[Any]) -> tuple[str, str]:
         default_image = self.settings.exec_container_image
         if self.settings.exec_runtime != "container":
@@ -694,6 +814,16 @@ class AgentLoopRunner:
             return {"ok": True, "failures": [], "checks": []}
 
         failures: list[str] = []
+        if produced_files is not None and self._task_requires_web_intel_contract(task):
+            expected_web_intel_paths = {
+                str(item.get("path", "")).strip()
+                for item in checks
+                if str(item.get("path", "")).strip().startswith("web_intel/")
+            }
+            missing_in_run = sorted(path for path in expected_web_intel_paths if path not in produced_files)
+            for path in missing_in_run:
+                failures.append(f"required web_intel output not produced in this run: {path}")
+
         root = workspace.resolve()
         for check in checks:
             ctype = str(check.get("type", "")).strip().lower()
@@ -776,6 +906,19 @@ class AgentLoopRunner:
             for path in python_files:
                 for module in required_modules:
                     checks.append({"type": "python_import", "path": path, "module": module})
+
+        # For fetch-first web-intel tasks, require script-generated markers
+        # so "manual summary/meta writing" does not silently pass objective checks.
+        is_web_intel_task = self._task_requires_web_intel_contract(task)
+        if is_web_intel_task:
+            lowered_task = (task or "").lower()
+            has_meta = ("web_intel/meta.json" in inferred_files) or ("web_intel/meta.json" in lowered_task)
+            has_summary = ("web_intel/summary.md" in inferred_files) or ("web_intel/summary.md" in lowered_task)
+            if has_meta:
+                checks.append({"type": "text_in_file", "path": "web_intel/meta.json", "contains": '"generated_by": "web_intel_fetch.py"'})
+                checks.append({"type": "text_in_file", "path": "web_intel/meta.json", "contains": '"timestamp": "'})
+            if has_summary:
+                checks.append({"type": "text_in_file", "path": "web_intel/summary.md", "contains": "# Web Intel Summary"})
 
         # preserve order with dedup
         seen = set()
@@ -864,6 +1007,16 @@ class AgentLoopRunner:
             seen.add(f)
             uniq.append(f)
         return uniq
+
+    def _task_requires_web_intel_contract(self, task: str) -> bool:
+        lowered = (task or "").lower()
+        if not lowered:
+            return False
+        triggers = ("fetch-first", "web_fetch", "web-intel", "web_intel")
+        if any(token in lowered for token in triggers):
+            return True
+        # If task explicitly asks to read these files, enforce contract as well.
+        return ("web_intel/meta.json" in lowered) or ("web_intel/summary.md" in lowered)
 
     def _is_within_root(self, path: Path, root: Path) -> bool:
         try:

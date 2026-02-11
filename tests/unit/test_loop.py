@@ -174,6 +174,54 @@ def test_loop_run_python_code_output_file_is_snapshotted_as_artifact(tmp_path: P
     assert "softnix_logger_summary.md" in store.list_artifacts(state.run_id)
 
 
+def test_loop_run_python_code_out_dir_files_are_snapshotted_as_artifacts(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {
+                            "code": (
+                                "import argparse\n"
+                                "from pathlib import Path\n"
+                                "p = argparse.ArgumentParser()\n"
+                                "p.add_argument('--out-dir', required=True)\n"
+                                "a = p.parse_args()\n"
+                                "d = Path(a.out_dir)\n"
+                                "d.mkdir(parents=True, exist_ok=True)\n"
+                                "(d / 'summary.md').write_text('# Web Intel Summary\\n', encoding='utf-8')\n"
+                                "(d / 'meta.json').write_text('{\"generated_by\":\"web_intel_fetch.py\"}\\n', encoding='utf-8')\n"
+                                "print('done')\n"
+                            ),
+                            "args": ["--out-dir", "web_intel"],
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="create web_intel outputs",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    artifacts = set(store.list_artifacts(state.run_id))
+    assert state.stop_reason == StopReason.COMPLETED
+    assert "web_intel/summary.md" in artifacts
+    assert "web_intel/meta.json" in artifacts
+
+
 def test_loop_autofills_rm_targets_from_task_when_missing(tmp_path: Path) -> None:
     script = tmp_path / "script.py"
     result = tmp_path / "result.txt"
@@ -410,6 +458,88 @@ Use this skill when task contains URL and asks summary.
     assert any("skills selected iteration=1 names=web-summary" in e for e in events)
 
 
+def test_loop_blocks_done_when_web_intel_contract_markers_missing(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "web_intel/summary.md", "content": "# Custom Summary\nmanual\n"},
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "web_intel/meta.json",
+                            "content": '{"url":"https://example.com","status":"partial"}\n',
+                        },
+                    },
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task=(
+            "ช่วยสรุปแบบ fetch-first และอ่าน web_intel/summary.md กับ web_intel/meta.json "
+            "ก่อนสรุปผลสุดท้าย"
+        ),
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "text not found in web_intel/meta.json: \"generated_by\": \"web_intel_fetch.py\"" in state.last_output
+
+
+def test_loop_blocks_done_when_web_intel_files_not_produced_in_current_run(tmp_path: Path) -> None:
+    web_intel = tmp_path / "web_intel"
+    web_intel.mkdir(parents=True, exist_ok=True)
+    (web_intel / "summary.md").write_text("# Web Intel Summary\nstale\n", encoding="utf-8")
+    (web_intel / "meta.json").write_text(
+        '{\n  "generated_by": "web_intel_fetch.py",\n  "timestamp": "2026-01-01T00:00:00+00:00"\n}\n',
+        encoding="utf-8",
+    )
+
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [],
+                "final_output": "done from stale files",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task=(
+            "ช่วยสรุปแบบ fetch-first และอ่าน web_intel/summary.md กับ web_intel/meta.json "
+            "ก่อนสรุปผลสุดท้าย"
+        ),
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "required web_intel output not produced in this run: web_intel/meta.json" in state.last_output
+
+
 def test_loop_normalizes_python3_alias_for_run_python_code(tmp_path: Path) -> None:
     provider = FakeProvider(
         outputs=[
@@ -585,6 +715,36 @@ def test_prepare_action_remaps_skill_script_into_workspace_execution(tmp_path: P
     params = prepared["params"]
     assert params["path"] == ".softnix_skill_exec/sendmail/scripts/send_with_resend.py"
     assert "from-skill" in params["code"]
+
+
+def test_prepare_action_rewrites_embedded_skill_script_paths_in_python_code(tmp_path: Path) -> None:
+    skill_root = tmp_path / "skills"
+    script = skill_root / "web-intel" / "scripts" / "web_intel_fetch.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("print('web-intel-from-skill')\n", encoding="utf-8")
+
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=skill_root)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    code = (
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, 'skills/web-intel/scripts/web_intel_fetch.py', '--url', 'https://x'])\n"
+    )
+    prepared = runner._prepare_action(
+        {"name": "run_python_code", "params": {"code": code}},
+        task="fetch first",
+        workspace=tmp_path,
+        skills_root=skill_root,
+    )
+    params = prepared["params"]
+    rewritten = str(params["code"])
+    assert "__softnix_skill_files" in rewritten
+    assert ".softnix_skill_exec/web-intel/scripts/web_intel_fetch.py" in rewritten
+    assert "skills/web-intel/scripts/web_intel_fetch.py" not in rewritten
+    assert "web-intel-from-skill" in rewritten
 
 
 def test_loop_stops_with_no_progress_before_max_iters(tmp_path: Path) -> None:
