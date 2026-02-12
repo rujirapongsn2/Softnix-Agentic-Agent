@@ -24,6 +24,9 @@ SUPPORTED_COMMANDS = {
     "cancel",
     "resume",
     "pending",
+    "skill_build",
+    "skill_status",
+    "skill_builds",
     "help",
 }
 

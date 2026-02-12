@@ -1,6 +1,7 @@
 from pathlib import Path
 import base64
 import re
+import time
 
 from fastapi.testclient import TestClient
 
@@ -171,6 +172,7 @@ def test_api_create_get_cancel(monkeypatch, tmp_path: Path) -> None:
     r_config = client.get("/system/config")
     assert r_config.status_code == 200
     assert r_config.json()["workspace"] == str(tmp_path)
+    assert r_config.json()["skill_builds_dir"] == str(settings.skill_builds_dir)
     assert r_config.json()["memory_admin_configured"] is True
 
     r_artifacts = client.get(f"/artifacts/{run_id}")
@@ -436,3 +438,60 @@ def test_upload_file_to_workspace(monkeypatch, tmp_path: Path) -> None:
     )
     assert blocked.status_code == 400
     assert "escapes workspace" in blocked.json()["detail"]
+
+
+def test_skill_build_api_create_and_track(monkeypatch, tmp_path: Path) -> None:
+    from softnix_agentic_agent.api import app as app_module
+    from softnix_agentic_agent.storage.skill_build_store import SkillBuildStore
+
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        workspace=tmp_path,
+        skills_dir=tmp_path / "skillpacks",
+        skill_builds_dir=tmp_path / ".softnix/skill-builds",
+    )
+    store = FilesystemStore(settings.runs_dir)
+    skill_build_store = SkillBuildStore(settings.skill_builds_dir)
+    monkeypatch.setattr(app_module, "_settings", settings)
+    monkeypatch.setattr(app_module, "_store", store)
+    monkeypatch.setattr(app_module, "_skill_build_store", skill_build_store)
+    monkeypatch.setattr(app_module, "_skill_build_service", None)
+    monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
+
+    client = TestClient(app_module.app)
+
+    created = client.post(
+        "/skills/build",
+        json={
+            "task": "ช่วยสร้าง skill ตรวจสอบสถานะคำสั่งซื้อ",
+            "api_key_name": "ORDER_API_KEY",
+            "api_key_value": "ord_key_test",
+            "endpoint_template": "/orders/{item_id}",
+            "allow_overwrite": True,
+        },
+    )
+    assert created.status_code == 200
+    item = created.json()["item"]
+    job_id = item["id"]
+    assert item["status"] in {"queued", "running"}
+
+    last = item
+    for _ in range(80):
+        resp = client.get(f"/skills/builds/{job_id}")
+        assert resp.status_code == 200
+        last = resp.json()["item"]
+        if last["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.05)
+
+    assert last["status"] == "completed"
+    assert last["stage"] == "completed"
+    assert last["skill_name"] == "order-status"
+    assert (settings.skills_dir / "order-status" / "SKILL.md").exists()
+    assert (settings.skills_dir / "order-status" / ".secret" / "ORDER_API_KEY").exists()
+
+    events = client.get(f"/skills/builds/{job_id}/events")
+    assert events.status_code == 200
+    assert any("build completed" in row for row in events.json()["items"])

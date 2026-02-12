@@ -22,6 +22,64 @@ from softnix_agentic_agent.types import IterationRecord, RunState, RunStatus, St
 
 
 class AgentLoopRunner:
+    _COMMON_OUTPUT_EXTENSIONS = {
+        "txt",
+        "md",
+        "json",
+        "csv",
+        "html",
+        "htm",
+        "xml",
+        "yaml",
+        "yml",
+        "log",
+        "py",
+        "js",
+        "ts",
+        "jsx",
+        "tsx",
+        "css",
+        "scss",
+        "sql",
+        "sh",
+        "bash",
+        "zsh",
+        "bat",
+        "ps1",
+        "ini",
+        "cfg",
+        "conf",
+        "toml",
+        "lock",
+        "env",
+        "pdf",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "bmp",
+        "webp",
+        "tif",
+        "tiff",
+        "zip",
+        "gz",
+        "tar",
+        "parquet",
+        "pkl",
+        "pickle",
+    }
+    _SECRET_TOKEN_PATTERNS = (
+        ("RESEND_API_KEY", re.compile(r"\bre_[A-Za-z0-9_-]{16,}\b")),
+        ("TAVILY_API_KEY", re.compile(r"\btvly-[A-Za-z0-9_-]{16,}\b")),
+        ("OPENAI_API_KEY", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")),
+    )
+
     def __init__(self, settings: Settings, planner: Planner, store: FilesystemStore) -> None:
         self.settings = settings
         self.planner = planner
@@ -55,10 +113,11 @@ class AgentLoopRunner:
         skills_dir: Path,
         max_iters: int,
     ) -> RunState:
+        sanitized_task, secret_names = self._sanitize_task_and_materialize_secrets(task=task, workspace=workspace)
         run_id = uuid.uuid4().hex[:12]
         state = RunState(
             run_id=run_id,
-            task=task,
+            task=sanitized_task,
             provider=provider_name,
             model=model,
             workspace=str(workspace.resolve()),
@@ -66,6 +125,11 @@ class AgentLoopRunner:
             max_iters=max_iters,
         )
         self.store.init_run(state)
+        if secret_names:
+            self.store.log_event(
+                state.run_id,
+                f"security policy applied: secrets sanitized count={len(secret_names)} names={','.join(secret_names)}",
+            )
         return state
 
     def execute_prepared_run(self, run_id: str) -> RunState:
@@ -126,8 +190,12 @@ class AgentLoopRunner:
         previous_iteration_signature = ""
         repeated_iteration_count = 0
         produced_files_in_run: set[str] = set()
-        required_outputs = self._infer_output_files_from_task(state.task)
+        required_outputs = self._merge_required_outputs(
+            self._infer_output_files_from_task(state.task),
+            self._infer_output_files_from_selected_skills(selected_for_runtime),
+        )
         previous_iteration_had_failed_action = False
+        previous_actions: list[dict[str, Any]] = []
         previous_action_results: list[dict[str, Any]] = []
         run_started_at = time.monotonic()
         planner_parse_error_streak = 0
@@ -204,9 +272,11 @@ class AgentLoopRunner:
                 skills_context = skill_loader.render_compact_context(task=state.task)
                 memory_context = memory.build_prompt_context(max_items=self.settings.memory_prompt_max_items)
                 runtime_guidance = self._build_runtime_guidance(
+                    task=state.task,
                     workspace=Path(state.workspace),
                     required_outputs=required_outputs,
                     produced_files=produced_files_in_run,
+                    previous_actions=previous_actions,
                     previous_action_results=previous_action_results,
                     objective_stagnation_streak=objective_stagnation_streak,
                 )
@@ -221,6 +291,36 @@ class AgentLoopRunner:
                     memory_context=memory_context,
                     runtime_guidance=runtime_guidance,
                 )
+                if self._should_force_execution_replan(
+                    task=state.task,
+                    iteration=current_iteration,
+                    required_outputs=required_outputs,
+                    actions=plan.get("actions", []) if isinstance(plan, dict) else [],
+                ):
+                    self.store.log_event(
+                        state.run_id,
+                        f"plan gate triggered iteration={current_iteration} reason=preparatory_only",
+                    )
+                    forced_guidance = (
+                        f"{runtime_guidance}\n"
+                        "Execution gate: next plan MUST include at least one non-preparatory action "
+                        "that executes the objective (run target script/command or produce required outputs). "
+                        "Do not return read_file/list_dir/date-only actions."
+                    )
+                    replan, replan_usage, replan_prompt, replan_attempts = self._build_plan_with_retry(
+                        state=state,
+                        task=state.task,
+                        iteration=current_iteration,
+                        max_iters=state.max_iters,
+                        previous_output=state.last_output,
+                        skills_context=skills_context,
+                        memory_context=memory_context,
+                        runtime_guidance=forced_guidance,
+                    )
+                    plan = replan
+                    prompt_text = replan_prompt
+                    token_usage = self._merge_token_usage(token_usage, replan_usage)
+                    planner_attempts += replan_attempts
                 planner_ms = int((time.perf_counter() - plan_started_at) * 1000)
                 if self._is_planner_parse_error(plan):
                     planner_parse_error_streak += 1
@@ -407,6 +507,7 @@ class AgentLoopRunner:
                 state.iteration = current_iteration
                 state.last_output = output
                 state.updated_at = utc_now_iso()
+                previous_actions = actions
                 previous_action_results = action_results
 
                 if done:
@@ -914,7 +1015,25 @@ class AgentLoopRunner:
             if not command:
                 return prepared
 
+            args_raw = params.get("args")
+            if isinstance(args_raw, list):
+                mapped_args: list[str] = []
+                for item in args_raw:
+                    mapped_args.append(
+                        self._rewrite_skill_path_token_to_workspace(
+                            token=str(item),
+                            skills_root=skills_root,
+                            workspace=workspace,
+                        )
+                    )
+                params["args"] = mapped_args
+
             command = self._normalize_shell_python_alias(command)
+            command = self._rewrite_shell_skill_paths_in_command(
+                command=command,
+                skills_root=skills_root,
+                workspace=workspace,
+            )
             params["command"] = command
 
             try:
@@ -933,6 +1052,16 @@ class AgentLoopRunner:
 
             params["paths"] = targets
             params["command"] = f"{command} " + " ".join(shlex.quote(t) for t in targets)
+            return prepared
+
+        if name == "read_file":
+            path_value = str(params.get("path", "")).strip()
+            if path_value:
+                params["path"] = self._rewrite_skill_path_token_to_workspace(
+                    token=path_value,
+                    skills_root=skills_root,
+                    workspace=workspace,
+                )
             return prepared
 
         if name == "run_python_code":
@@ -959,6 +1088,37 @@ class AgentLoopRunner:
             return prepared
 
         return prepared
+
+    def _rewrite_shell_skill_paths_in_command(self, command: str, skills_root: Path, workspace: Path) -> str:
+        try:
+            parts = shlex.split(command)
+        except Exception:
+            return command
+        if not parts:
+            return command
+        mapped = [
+            self._rewrite_skill_path_token_to_workspace(
+                token=token,
+                skills_root=skills_root,
+                workspace=workspace,
+            )
+            for token in parts
+        ]
+        return shlex.join(mapped)
+
+    def _rewrite_skill_path_token_to_workspace(self, token: str, skills_root: Path, workspace: Path) -> str:
+        text = (token or "").strip()
+        if not text:
+            return token
+        resolved = self._resolve_skill_file_path(value=text, skills_root=skills_root)
+        if resolved is None:
+            return token
+        rel = self._materialize_skill_file_to_workspace(
+            source_file=resolved,
+            skills_root=skills_root,
+            workspace=workspace,
+        )
+        return rel or token
 
     def _normalize_shell_python_alias(self, command: str) -> str:
         try:
@@ -1040,6 +1200,14 @@ class AgentLoopRunner:
         return aliases.get(raw, raw)
 
     def _resolve_skill_script_path(self, value: str, skills_root: Path) -> Path | None:
+        return self._resolve_skill_file_path(value=value, skills_root=skills_root, allowed_suffixes={".py"})
+
+    def _resolve_skill_file_path(
+        self,
+        value: str,
+        skills_root: Path,
+        allowed_suffixes: set[str] | None = None,
+    ) -> Path | None:
         text = (value or "").strip()
         if not text:
             return None
@@ -1057,8 +1225,31 @@ class AgentLoopRunner:
             if not self._is_within_root(candidate, root):
                 continue
             if candidate.exists() and candidate.is_file():
+                if allowed_suffixes is not None and candidate.suffix.lower() not in allowed_suffixes:
+                    continue
                 return candidate
         return None
+
+    def _materialize_skill_file_to_workspace(self, source_file: Path, skills_root: Path, workspace: Path) -> str:
+        root = skills_root.resolve()
+        src = source_file.resolve()
+        if not self._is_within_root(src, root):
+            return ""
+        try:
+            rel = src.relative_to(root)
+        except ValueError:
+            return ""
+        dst_rel = Path(".softnix_skill_exec") / rel
+        dst = (workspace.resolve() / dst_rel).resolve()
+        if not self._is_within_root(dst, workspace.resolve()):
+            return ""
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            content = src.read_text(encoding="utf-8")
+            dst.write_text(content, encoding="utf-8")
+        except Exception:
+            return ""
+        return str(dst_rel).replace("\\", "/")
 
     def _rewrite_embedded_skill_script_refs(self, code: str, skills_root: Path) -> str:
         pattern = re.compile(r"(?P<q>['\"])(?P<path>[^'\"]+?\.py)(?P=q)")
@@ -1336,9 +1527,11 @@ class AgentLoopRunner:
 
     def _build_runtime_guidance(
         self,
+        task: str,
         workspace: Path,
         required_outputs: list[str],
         produced_files: set[str],
+        previous_actions: list[dict[str, Any]],
         previous_action_results: list[dict[str, Any]],
         objective_stagnation_streak: int,
     ) -> str:
@@ -1364,6 +1557,23 @@ class AgentLoopRunner:
             stale = progress.get("stale_paths", [])
             if stale:
                 guidance.append(f"Existing but stale outputs (must regenerate in this run): {', '.join(stale[:8])}")
+        elif not self._is_answer_only_task(task):
+            guidance.append(
+                "Execution objective: this task requires performing an operation "
+                "(not only reading/analyzing). Execute the target command/script and verify success."
+            )
+
+        if self._is_preparatory_only_iteration(previous_actions=previous_actions, previous_action_results=previous_action_results):
+            guidance.append(
+                "Previous iteration was preparatory only (inspection/install/date checks). "
+                "Now execute the real objective action."
+            )
+
+        if self._has_recent_dependency_install(previous_actions=previous_actions, previous_action_results=previous_action_results):
+            guidance.append(
+                "Dependency installation succeeded in the previous iteration. "
+                "Immediately rerun the original objective command/script now."
+            )
 
         missing_paths = self._extract_missing_paths_from_results(previous_action_results)
         if missing_paths:
@@ -1386,6 +1596,128 @@ class AgentLoopRunner:
         if not guidance:
             return "- none"
         return "\n".join(guidance)
+
+    def _is_preparatory_only_iteration(
+        self,
+        previous_actions: list[dict[str, Any]],
+        previous_action_results: list[dict[str, Any]],
+    ) -> bool:
+        if not previous_actions:
+            return False
+
+        paired = list(zip(previous_actions, previous_action_results))
+        if not paired:
+            return False
+
+        all_ok = all(bool(result.get("ok", False)) for _, result in paired)
+        if not all_ok:
+            return False
+
+        prepared_action_names = {"read_file", "list_dir"}
+        for action, result in paired:
+            action_name = str(action.get("name", "")).strip().lower()
+            result_name = str(result.get("name", "")).strip().lower()
+            effective_name = action_name or result_name
+            if effective_name in prepared_action_names:
+                continue
+            if effective_name in {"run_shell_command", "run_safe_command"}:
+                params = action.get("params", {}) if isinstance(action.get("params"), dict) else {}
+                command = str(params.get("command", "")).strip().lower()
+                args = params.get("args")
+                if self._is_pip_install_command(command=command, args=args):
+                    continue
+            return False
+        return True
+
+    def _has_recent_dependency_install(
+        self,
+        previous_actions: list[dict[str, Any]],
+        previous_action_results: list[dict[str, Any]],
+    ) -> bool:
+        for action, result in zip(previous_actions, previous_action_results):
+            if not bool(result.get("ok", False)):
+                continue
+            params = action.get("params", {}) if isinstance(action.get("params"), dict) else {}
+            command = str(params.get("command", "")).strip().lower()
+            args = params.get("args")
+            if not self._is_pip_install_command(command=command, args=args):
+                continue
+            output = str(result.get("output", "")).lower()
+            if "successfully installed" in output:
+                return True
+        return False
+
+    def _is_pip_install_command(self, command: str, args: Any) -> bool:
+        cmd = (command or "").strip().lower()
+        arg_list = [str(a).strip().lower() for a in args] if isinstance(args, list) else []
+
+        if cmd in {"pip", "pip3"}:
+            return bool(arg_list) and arg_list[0] == "install"
+
+        parts = [p for p in cmd.split() if p]
+        if len(parts) >= 3 and parts[0] in {"python", "python3"} and parts[1] == "-m" and parts[2] == "pip":
+            if len(parts) >= 4 and parts[3] == "install":
+                return True
+            return bool(arg_list) and arg_list[0] == "install"
+        return False
+
+    def _should_force_execution_replan(
+        self,
+        task: str,
+        iteration: int,
+        required_outputs: list[str],
+        actions: list[dict[str, Any]],
+    ) -> bool:
+        if iteration <= 1:
+            return False
+        if self._is_answer_only_task(task):
+            return False
+        # For operational tasks without explicit output contract, block preparatory-only loops.
+        if required_outputs:
+            return False
+        return self._is_preparatory_plan_actions(actions)
+
+    def _is_preparatory_plan_actions(self, actions: list[dict[str, Any]]) -> bool:
+        if not actions:
+            return True
+        for action in actions:
+            if not isinstance(action, dict):
+                return False
+            name = str(action.get("name", "")).strip().lower()
+            params = action.get("params", {}) if isinstance(action.get("params"), dict) else {}
+            if name in {"read_file", "list_dir"}:
+                continue
+            if name in {"run_shell_command", "run_safe_command"}:
+                command = str(params.get("command", "")).strip().lower()
+                if self._is_pip_install_command(command=command, args=params.get("args")):
+                    continue
+                if command in {"pwd", "date", "ls", "cat"}:
+                    continue
+                return False
+            if name == "run_python_code":
+                path = str(params.get("path", "")).strip()
+                if path:
+                    return False
+                code = str(params.get("code", "")).lower()
+                mutating_markers = (
+                    "write_text(",
+                    ".write(",
+                    "open(",
+                    "subprocess",
+                    "os.system",
+                    "resend.emails.send",
+                    "requests.",
+                    "httpx.",
+                    "web_fetch",
+                )
+                if any(marker in code for marker in mutating_markers):
+                    return False
+                prep_markers = ("datetime", "date.today", "timedelta", "print(")
+                if any(marker in code for marker in prep_markers):
+                    continue
+                return False
+            return False
+        return True
 
     def _objective_progress_snapshot(
         self,
@@ -1522,7 +1854,8 @@ class AgentLoopRunner:
         root = workspace.resolve()
         for check in checks:
             ctype = str(check.get("type", "")).strip().lower()
-            path_text = str(check.get("path", "")).strip()
+            raw_path_text = str(check.get("path", "")).strip()
+            path_text = self._resolve_validation_path(raw_path_text, produced_files)
             if not path_text:
                 failures.append("validation missing path")
                 continue
@@ -1767,6 +2100,8 @@ class AgentLoopRunner:
                 token = token[2:]
             if token.startswith("/"):
                 continue
+            if not self._looks_like_workspace_output_candidate(token):
+                continue
             files.append(token)
 
         if is_web_intel_task:
@@ -1779,6 +2114,40 @@ class AgentLoopRunner:
                 continue
             seen.add(f)
             uniq.append(f)
+        return uniq
+
+    def _infer_output_files_from_selected_skills(self, selected_skills: list[Any]) -> list[str]:
+        rows: list[str] = []
+        for skill in selected_skills:
+            artifacts = getattr(skill, "success_artifacts", []) or []
+            if not isinstance(artifacts, list):
+                continue
+            for raw in artifacts:
+                candidate = str(raw or "").strip().replace("\\", "/")
+                if not candidate:
+                    continue
+                if candidate.startswith(("/", "../")):
+                    continue
+                rows.append(candidate)
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for item in rows:
+            if item in seen:
+                continue
+            seen.add(item)
+            uniq.append(item)
+        return uniq
+
+    def _merge_required_outputs(self, left: list[str], right: list[str]) -> list[str]:
+        rows = list(left or []) + list(right or [])
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for raw in rows:
+            item = str(raw or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            uniq.append(item)
         return uniq
 
     def _infer_input_file_refs_from_task(self, text: str, candidates: list[str]) -> set[str]:
@@ -1843,6 +2212,121 @@ class AgentLoopRunner:
             return True
         # If task explicitly asks to read these files, enforce contract as well.
         return ("web_intel/meta.json" in lowered) or ("web_intel/summary.md" in lowered)
+
+    def _sanitize_task_and_materialize_secrets(self, task: str, workspace: Path) -> tuple[str, list[str]]:
+        text = (task or "").strip()
+        if not text:
+            return text, []
+        secret_map = self._extract_secrets_from_task_text(text)
+        if not secret_map:
+            return text, []
+
+        secret_root = workspace.resolve() / ".secret"
+        secret_root.mkdir(parents=True, exist_ok=True)
+        redacted = text
+        names: list[str] = []
+        for key_name, secret_value in secret_map.items():
+            (secret_root / key_name).write_text(f"{secret_value}\n", encoding="utf-8")
+            redacted = redacted.replace(secret_value, f"<REDACTED:{key_name}>")
+            names.append(key_name)
+
+        guidance = [
+            "",
+            "[Security policy applied]",
+            "Detected secret values in task were redacted and stored in workspace .secret files:",
+        ]
+        for key_name in names:
+            guidance.append(f"- .secret/{key_name}")
+        guidance.append("Do not hardcode secret values in generated code or output.")
+        return redacted + "\n" + "\n".join(guidance), names
+
+    def _extract_secrets_from_task_text(self, text: str) -> dict[str, str]:
+        task = str(text or "")
+        found: dict[str, str] = {}
+
+        for m in re.finditer(
+            r"\b(?P<name>[A-Z][A-Z0-9_]{2,64}(?:API_KEY|TOKEN|SECRET_KEY))\s*[:=]\s*[\"']?(?P<value>[^\s\"',}]+)",
+            task,
+        ):
+            key_name = str(m.group("name") or "").strip().upper()
+            key_value = str(m.group("value") or "").strip()
+            if not self._looks_like_secret_value(key_value):
+                continue
+            found.setdefault(key_name, key_value)
+
+        resend_key_match = re.search(r"resend\.api_key\s*=\s*[\"']([^\"']+)[\"']", task, flags=re.IGNORECASE)
+        if resend_key_match:
+            key_value = str(resend_key_match.group(1) or "").strip()
+            if self._looks_like_secret_value(key_value):
+                found.setdefault("RESEND_API_KEY", key_value)
+
+        for key_name, pattern in self._SECRET_TOKEN_PATTERNS:
+            for m in pattern.finditer(task):
+                key_value = str(m.group(0) or "").strip()
+                if self._looks_like_secret_value(key_value):
+                    found.setdefault(key_name, key_value)
+
+        return found
+
+    def _looks_like_secret_value(self, value: str) -> bool:
+        token = str(value or "").strip()
+        if len(token) < 12:
+            return False
+        lowered = token.lower()
+        if lowered in {"__set_me__", "your_api_key", "api_key_here", "changeme", "placeholder"}:
+            return False
+        if token.startswith("<") and token.endswith(">"):
+            return False
+        if any(ch.isspace() for ch in token):
+            return False
+        has_alpha = any(ch.isalpha() for ch in token)
+        has_digit = any(ch.isdigit() for ch in token)
+        has_sep = any(ch in {"_", "-", "."} for ch in token)
+        return has_alpha and (has_digit or has_sep)
+
+    def _looks_like_workspace_output_candidate(self, token: str) -> bool:
+        value = (token or "").strip().lower()
+        if not value:
+            return False
+        ext = Path(value).suffix.lower().lstrip(".")
+        if not ext:
+            return False
+        # If the candidate has no directory component, require a known output-like extension.
+        # This prevents domain/identifier tokens (e.g. gmail.com, resend.api_key) from
+        # being treated as required output artifacts.
+        if "/" not in value:
+            return ext in self._COMMON_OUTPUT_EXTENSIONS
+        return True
+
+    def _resolve_validation_path(self, path_text: str, produced_files: set[str] | None) -> str:
+        raw = (path_text or "").strip()
+        if not raw:
+            return ""
+        if raw.startswith("./"):
+            raw = raw[2:]
+        if raw.startswith("/"):
+            return raw
+        if not produced_files:
+            return raw
+        if raw in produced_files:
+            return raw
+
+        normalized = raw.replace("\\", "/")
+        if normalized in produced_files:
+            return normalized
+
+        suffix = f"/{normalized}"
+        suffix_matches = sorted(path for path in produced_files if path.endswith(suffix))
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
+
+        name = Path(normalized).name
+        if not name:
+            return raw
+        name_matches = sorted(path for path in produced_files if Path(path).name == name)
+        if len(name_matches) == 1:
+            return name_matches[0]
+        return raw
 
     def _is_within_root(self, path: Path, root: Path) -> bool:
         try:

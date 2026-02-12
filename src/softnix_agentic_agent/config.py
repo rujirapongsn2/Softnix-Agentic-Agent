@@ -12,6 +12,7 @@ class Settings:
     max_iters: int = 10
     workspace: Path = Path(".")
     runs_dir: Path = Path(".softnix/runs")
+    skill_builds_dir: Path = Path(".softnix/skill-builds")
     skills_dir: Path = Path("skillpacks")
     safe_commands: list[str] = None  # type: ignore[assignment]
     openai_api_key: str | None = None
@@ -126,6 +127,7 @@ def load_settings() -> Settings:
         max_iters=int(os.getenv("SOFTNIX_MAX_ITERS", "10")),
         workspace=Path(os.getenv("SOFTNIX_WORKSPACE", ".")).resolve(),
         runs_dir=Path(os.getenv("SOFTNIX_RUNS_DIR", ".softnix/runs")),
+        skill_builds_dir=Path(os.getenv("SOFTNIX_SKILL_BUILDS_DIR", ".softnix/skill-builds")),
         skills_dir=Path(os.getenv("SOFTNIX_SKILLS_DIR", "skillpacks")),
         safe_commands=safe_commands,
         openai_api_key=os.getenv("SOFTNIX_OPENAI_API_KEY"),

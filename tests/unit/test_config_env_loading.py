@@ -30,6 +30,14 @@ def test_shell_env_overrides_dotenv(tmp_path: Path, monkeypatch) -> None:
     assert settings.model == "shell-model"
 
 
+def test_skill_builds_dir_config_from_env(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text("SOFTNIX_SKILL_BUILDS_DIR=.softnix/custom-skill-builds\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SOFTNIX_SKILL_BUILDS_DIR", raising=False)
+    settings = load_settings()
+    assert str(settings.skill_builds_dir) == ".softnix/custom-skill-builds"
+
+
 def test_security_config_from_env(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".env").write_text(
         "SOFTNIX_API_KEY=abc123\n"

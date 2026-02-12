@@ -19,6 +19,19 @@ class SkillLoader:
         "ai",
         "io",
     }
+    _TASK_STOPWORDS = {
+        "skill",
+        "skills",
+        "ช่วย",
+        "ให้",
+        "ใช้",
+        "ต้องการ",
+        "หน่อย",
+        "ครับ",
+        "ค่ะ",
+        "คะ",
+        "na",
+    }
 
     def __init__(self, skills_root: Path) -> None:
         self.skills_root = skills_root
@@ -36,6 +49,7 @@ class SkillLoader:
         if not skills:
             return "No skills found."
 
+        skills_root_abs = str(self.skills_root.resolve())
         lines = []
         for s in skills:
             if s.references:
@@ -46,6 +60,9 @@ class SkillLoader:
             script_refs = self._script_reference_paths(s)
             if script_refs:
                 lines.append(f"  scripts: {', '.join(script_refs[:3])}")
+            success_artifacts = getattr(s, "success_artifacts", []) or []
+            if success_artifacts:
+                lines.append(f"  success_artifacts: {', '.join(success_artifacts[:5])}")
 
             # Include a short actionable excerpt for relevant skills so behavior is guided by SKILL.md.
             excerpt = self._short_body_excerpt(s.body, max_lines=8)
@@ -53,7 +70,10 @@ class SkillLoader:
                 for ln in excerpt.splitlines():
                     lines.append(f"  {ln}")
         lines.append(
-            "Note: skill scripts/references under skills_dir are trusted read-only inputs; "
+            f"Note: skills_dir absolute path is `{skills_root_abs}` (outside workspace in many setups)."
+        )
+        lines.append(
+            "Use absolute script/reference paths above when reading skill files; "
             "copy to workspace before modification."
         )
         return "\n".join(lines)
@@ -78,19 +98,23 @@ class SkillLoader:
             or bool(re.search(r"\bwww\.[a-z0-9.-]+", task_text))
         )
         task_has_search_intent = self._task_has_search_intent(task_text)
+        task_has_email_intent = self._task_has_email_intent(task_text)
 
         def score(skill: SkillDefinition) -> tuple[int, int, str]:
-            blob = f"{skill.name} {skill.description} {skill.body}".lower()
+            refs_blob = " ".join(str(ref.name).lower() for ref in skill.references)
             name_desc_blob = f"{skill.name} {skill.description}".lower()
-            token_hits = sum(1 for t in task_tokens if self._token_in_blob(token=t, blob=blob))
+            token_hits = sum(1 for t in task_tokens if self._token_in_blob(token=t, blob=name_desc_blob))
+            ref_hits = sum(1 for t in task_tokens if self._token_in_blob(token=t, blob=refs_blob))
+            token_hits += ref_hits
             intent_bonus = 2 if task_has_search_intent and self._is_search_or_news_skill(name_desc_blob) else 0
-            url_bonus = 2 if task_has_url and self._is_web_related(blob) else 0
+            email_bonus = 3 if task_has_email_intent and self._is_email_related(name_desc_blob) else 0
+            url_bonus = 2 if task_has_url and self._is_web_related(name_desc_blob) else 0
             if task_has_url and (not task_has_search_intent) and self._is_search_or_news_skill(name_desc_blob):
                 url_bonus = 0
             explicit_bonus = 100 if skill.name.lower() in explicit_mentions else 0
-            total = token_hits + intent_bonus + url_bonus + explicit_bonus
+            total = token_hits + intent_bonus + email_bonus + url_bonus + explicit_bonus
             # Keep components in tuple for deterministic sorting and filtering.
-            return (total, token_hits + intent_bonus + url_bonus, skill.name.lower())
+            return (total, token_hits + intent_bonus + email_bonus + url_bonus, skill.name.lower())
 
         scored_rows: list[tuple[SkillDefinition, tuple[int, int, str]]] = []
         for skill in skills:
@@ -119,7 +143,7 @@ class SkillLoader:
         raw_tokens = {t for t in re.findall(r"[a-z0-9ก-๙_-]+", task_text) if len(t) >= 2}
         normalized: set[str] = set()
         for token in raw_tokens:
-            if token in self._DOMAIN_STOPWORDS:
+            if token in self._DOMAIN_STOPWORDS or token in self._TASK_STOPWORDS:
                 continue
             if re.fullmatch(r"[a-z0-9_-]+", token) and len(token) < 3:
                 continue
@@ -149,6 +173,14 @@ class SkillLoader:
         markers = ("search", "query", "find", "news", "ค้นหา", "ข่าว", "หาให้")
         return any(marker in task_text for marker in markers)
 
+    def _task_has_email_intent(self, task_text: str) -> bool:
+        markers = ("email", "e-mail", "mail", "อีเมล", "ส่งเมล", "ส่งอีเมล์")
+        return any(marker in task_text for marker in markers)
+
+    def _is_email_related(self, blob: str) -> bool:
+        markers = ("email", "mail", "resend", "smtp", "อีเมล")
+        return any(marker in blob for marker in markers)
+
     def _short_body_excerpt(self, body: str, max_lines: int = 4) -> str:
         rows = []
         for line in body.splitlines():
@@ -165,11 +197,12 @@ class SkillLoader:
     def _script_reference_paths(self, skill: SkillDefinition) -> list[str]:
         rows: list[str] = []
         for ref in skill.references:
+            resolved = ref.resolve()
             try:
-                rel = ref.resolve().relative_to(skill.path.parent.resolve())
+                rel = resolved.relative_to(skill.path.parent.resolve())
             except ValueError:
                 continue
-            text = str(rel).replace("\\", "/")
-            if text.startswith("scripts/"):
-                rows.append(text)
+            rel_text = str(rel).replace("\\", "/")
+            if rel_text.startswith("scripts/"):
+                rows.append(str(resolved))
         return rows

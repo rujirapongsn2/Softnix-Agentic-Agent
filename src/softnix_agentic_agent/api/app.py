@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from softnix_agentic_agent.config import load_settings
+from softnix_agentic_agent.integrations.skill_build_service import SkillBuildService
 from softnix_agentic_agent.integrations.telegram_gateway import TelegramGateway
 from softnix_agentic_agent.integrations.schedule_parser import parse_natural_schedule_text
 from softnix_agentic_agent.memory.admin_control import AdminPrincipal, MemoryAdminControlPlane
@@ -26,6 +27,7 @@ from softnix_agentic_agent.runtime import build_runner
 from softnix_agentic_agent.skills.loader import SkillLoader
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
 from softnix_agentic_agent.storage.schedule_store import ScheduleStore, compute_next_run_at
+from softnix_agentic_agent.storage.skill_build_store import SkillBuildStore
 
 
 class RunCreateRequest(BaseModel):
@@ -96,13 +98,27 @@ class FileUploadRequest(BaseModel):
     path: str | None = None
 
 
+class SkillBuildRequest(BaseModel):
+    task: str
+    skill_name: str | None = None
+    description: str | None = None
+    guidance: str | None = None
+    api_key_name: str | None = None
+    api_key_value: str | None = None
+    endpoint_template: str | None = None
+    install_on_success: bool = True
+    allow_overwrite: bool = False
+
+
 app = FastAPI(title="Softnix Agentic Agent API", version="0.1.0")
 _settings = load_settings()
 _store = FilesystemStore(_settings.runs_dir)
 _schedule_store = ScheduleStore(_settings.scheduler_dir)
+_skill_build_store = SkillBuildStore(_settings.skill_builds_dir)
 _threads: dict[str, threading.Thread] = {}
 _telegram_gateway: TelegramGateway | None = None
 _memory_admin: MemoryAdminControlPlane | None = None
+_skill_build_service: SkillBuildService | None = None
 _scheduler_thread: threading.Thread | None = None
 _scheduler_stop = threading.Event()
 
@@ -681,6 +697,13 @@ def _build_telegram_gateway() -> TelegramGateway:
     return _telegram_gateway
 
 
+def _build_skill_build_service() -> SkillBuildService:
+    global _skill_build_service
+    if _skill_build_service is None:
+        _skill_build_service = SkillBuildService(settings=_settings, store=_skill_build_store)
+    return _skill_build_service
+
+
 def _build_memory_admin() -> MemoryAdminControlPlane:
     global _memory_admin
     if _memory_admin is None:
@@ -957,6 +980,42 @@ def list_skills() -> dict:
     return {"items": items}
 
 
+@app.post("/skills/build")
+def create_skill_build(payload: SkillBuildRequest) -> dict:
+    service = _build_skill_build_service()
+    try:
+        item = service.start_build(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"item": item}
+
+
+@app.get("/skills/builds")
+def list_skill_builds(limit: int = Query(default=50, ge=1, le=200)) -> dict:
+    service = _build_skill_build_service()
+    return {"items": service.list_builds(limit=limit)}
+
+
+@app.get("/skills/builds/{job_id}")
+def get_skill_build(job_id: str) -> dict:
+    service = _build_skill_build_service()
+    try:
+        item = service.get_build(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="skill build job not found") from exc
+    return {"item": item}
+
+
+@app.get("/skills/builds/{job_id}/events")
+def get_skill_build_events(job_id: str) -> dict:
+    service = _build_skill_build_service()
+    try:
+        _ = service.get_build(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="skill build job not found") from exc
+    return {"items": service.read_events(job_id)}
+
+
 @app.get("/artifacts/{run_id}")
 def list_artifacts(run_id: str) -> dict:
     try:
@@ -1032,6 +1091,7 @@ def system_config() -> dict:
         "model": _settings.model,
         "workspace": str(_settings.workspace),
         "runs_dir": str(_settings.runs_dir),
+        "skill_builds_dir": str(_settings.skill_builds_dir),
         "skills_dir": str(_settings.skills_dir),
         "max_iters": _settings.max_iters,
         "safe_commands": _settings.safe_commands,

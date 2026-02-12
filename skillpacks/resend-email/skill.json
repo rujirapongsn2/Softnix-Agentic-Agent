@@ -1,0 +1,20 @@
+{
+  "name": "resend-email",
+  "description": "ส่งอีเมลผ่าน Resend API ด้วย Python",
+  "version": "1.0.0",
+  "scripts": {
+    "send_email": "scripts/send_email.py"
+  },
+  "secrets": [
+    "RESEND_API_KEY"
+  ],
+  "dependencies": [
+    "resend"
+  ],
+  "parameters": {
+    "from": { "type": "string", "required": true, "description": "Sender address" },
+    "to": { "type": "string", "required": true, "description": "Recipient email(s), comma-separated" },
+    "subject": { "type": "string", "required": true, "description": "Email subject" },
+    "html": { "type": "string", "required": true, "description": "HTML body" }
+  }
+}

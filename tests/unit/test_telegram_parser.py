@@ -53,3 +53,15 @@ def test_parse_telegram_yes_no_commands() -> None:
     assert no_cmd is not None
     assert yes_cmd.name == "yes"
     assert no_cmd.name == "no"
+
+
+def test_parse_telegram_skill_build_commands() -> None:
+    build_cmd = parse_telegram_command("/skill_build ช่วยสร้าง skill ตรวจสอบสถานะคำสั่งซื้อ")
+    status_cmd = parse_telegram_command("/skill_status abcd1234")
+    builds_cmd = parse_telegram_command("/skill_builds")
+    assert build_cmd is not None
+    assert status_cmd is not None
+    assert builds_cmd is not None
+    assert build_cmd.name == "skill_build"
+    assert status_cmd.name == "skill_status"
+    assert builds_cmd.name == "skill_builds"

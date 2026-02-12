@@ -19,11 +19,14 @@
   - workspace governance + artifact snapshot ใน run storage
   - safety policy พื้นฐานสำหรับ command/action allowlist
   - objective validation + no-progress detection + guard เพิ่มเติม (`planner_parse_error streak`, capability failure streak, wall-time limit)
+  - skill selector คัดเฉพาะ skill ที่เกี่ยวข้องกับ task (ลด context noise / ลดการเรียก skill ที่ไม่จำเป็น)
+  - execution gate สำหรับงานเชิงปฏิบัติการ (กันลูป preparatory-only เช่น read/calc วนโดยไม่ execute จริง)
+  - skill contract ระบุ `success_artifacts` และใช้เป็น objective requirement อัตโนมัติใน loop
 - งานคงเหลือ (ต้องทำต่อ):
   - benchmark เปรียบเทียบ profile/image แต่ละแบบ (duration/success rate/cost)
   - เพิ่ม cold-start/warm-start metrics สำหรับ `per_run` เพื่อตัดสินใจ optimize lifecycle
   - เพิ่ม semantic success criteria (เช่น command exit expectations, artifact freshness per iteration)
-  - เพิ่ม objective contract จาก task parser ให้เข้มขึ้นสำหรับ task เชิงโปรแกรม
+  - เพิ่ม objective contract จาก task parser ให้ครอบคลุม task เชิงโปรแกรมที่ซับซ้อนขึ้น (นอกเหนือจาก skill contract ที่มีแล้ว)
   - เพิ่ม fallback planner/degraded planning path ให้ robust มากขึ้นสำหรับงานยาวและบริบทใหญ่ (เริ่มต้นแล้ว: retry-on-parse-error)
 - ผลลัพธ์: Agent ทำงาน data/code transformation แบบ end-to-end ได้ด้วยโค้ดที่สร้างเองอย่างปลอดภัยและตรวจสอบย้อนหลังได้
 
@@ -35,6 +38,10 @@
   - รับคำสั่งจาก Telegram chat แล้ว trigger run ผ่าน Agent Core/API
   - ส่งความคืบหน้าและผลลัพธ์กลับไปที่ chat เดิม
   - รองรับการควบคุม run ขั้นพื้นฐาน (`start/status/cancel/resume`)
+- สถานะปัจจุบัน (MVP เสร็จแล้ว):
+  - รองรับ natural mode (ไม่ต้องพิมพ์ `/run` ทุกครั้ง)
+  - รองรับงานตั้งเวลา (`/schedule`, `/schedules`, `/schedule_runs`, `/schedule_disable`, `/schedule_delete`)
+  - รองรับ skill build jobs (`/skill_build`, `/skill_status`, `/skill_builds`) และส่งผลจบงานอัตโนมัติ
 - งานหลัก (Phase 2: Hardening):
   - access control ต่อ chat/user + anti-abuse (rate limit, cooldown, retry)
   - idempotency และ dedup สำหรับ message update ซ้ำ

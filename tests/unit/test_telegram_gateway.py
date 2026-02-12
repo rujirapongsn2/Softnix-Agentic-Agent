@@ -352,3 +352,97 @@ def test_gateway_risky_task_requires_confirmation_then_yes_runs(tmp_path: Path, 
     assert "tg-run-1" in threads
     threads["tg-run-1"].join(timeout=2)
     assert any("Started run: tg-run-1" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_skill_build_command_and_status(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path / "skillpacks",
+        skill_builds_dir=tmp_path / ".softnix/skill-builds",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    class _FakeSkillBuildService:
+        def start_build(self, payload):  # type: ignore[no-untyped-def]
+            return {"id": "job123", "skill_name": "order-status", "status": "queued"}
+
+        def get_build(self, job_id):  # type: ignore[no-untyped-def]
+            return {"id": job_id, "skill_name": "order-status", "status": "completed", "stage": "completed"}
+
+        def list_builds(self, limit=10):  # type: ignore[no-untyped-def]
+            return [{"id": "job123", "skill_name": "order-status", "status": "completed", "stage": "completed"}]
+
+    gateway.skill_build_service = _FakeSkillBuildService()  # type: ignore[assignment]
+
+    ok_build = gateway.handle_update(
+        {"update_id": 30, "message": {"chat": {"id": 8388377631}, "text": "/skill_build สร้าง skill ตรวจสอบสถานะคำสั่งซื้อ"}}
+    )
+    ok_status = gateway.handle_update(
+        {"update_id": 31, "message": {"chat": {"id": 8388377631}, "text": "/skill_status job123"}}
+    )
+    ok_list = gateway.handle_update(
+        {"update_id": 32, "message": {"chat": {"id": 8388377631}, "text": "/skill_builds"}}
+    )
+
+    assert ok_build is True
+    assert ok_status is True
+    assert ok_list is True
+    assert any("Skill build started: job123" in text for _, text in fake_client.sent_messages)
+    assert any("Skill build job123" in text for _, text in fake_client.sent_messages)
+    assert any("Skill builds (" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_skill_build_auto_notify_completion(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path / "skillpacks",
+        skill_builds_dir=tmp_path / ".softnix/skill-builds",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    threads: dict[str, threading.Thread] = {}
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry=threads, client=fake_client)
+
+    class _FakeSkillBuildService:
+        def __init__(self) -> None:
+            self._reads = 0
+
+        def start_build(self, payload):  # type: ignore[no-untyped-def]
+            return {"id": "job555", "skill_name": "order-status", "status": "running"}
+
+        def get_build(self, job_id):  # type: ignore[no-untyped-def]
+            self._reads += 1
+            if self._reads < 2:
+                return {"id": job_id, "skill_name": "order-status", "status": "running", "stage": "validate"}
+            return {
+                "id": job_id,
+                "skill_name": "order-status",
+                "status": "completed",
+                "stage": "completed",
+                "installed_path": str(tmp_path / "skillpacks" / "order-status"),
+            }
+
+        def list_builds(self, limit=10):  # type: ignore[no-untyped-def]
+            return []
+
+    gateway.skill_build_service = _FakeSkillBuildService()  # type: ignore[assignment]
+
+    ok = gateway.handle_update(
+        {"update_id": 50, "message": {"chat": {"id": 8388377631}, "text": "/skill_build สร้าง skill ตรวจสอบสถานะคำสั่งซื้อ"}}
+    )
+    assert ok is True
+    for key, thread in list(threads.items()):
+        if key.startswith("skill-build:"):
+            thread.join(timeout=2)
+    assert any("Skill build started: job555" in text for _, text in fake_client.sent_messages)
+    assert any("Skill build job555: completed" in text for _, text in fake_client.sent_messages)

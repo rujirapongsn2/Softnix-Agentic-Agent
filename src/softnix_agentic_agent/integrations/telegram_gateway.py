@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from softnix_agentic_agent.config import Settings
+from softnix_agentic_agent.integrations.skill_build_service import SkillBuildService
 from softnix_agentic_agent.integrations.schedule_parser import parse_natural_schedule_text
 from softnix_agentic_agent.integrations.telegram_client import TelegramClient
 from softnix_agentic_agent.integrations.telegram_parser import TelegramCommand, parse_telegram_command
@@ -38,6 +39,7 @@ class TelegramGateway:
         self.client = client or TelegramClient(bot_token=settings.telegram_bot_token or "")
         self._next_offset = 0
         self.schedule_store = ScheduleStore(settings.scheduler_dir)
+        self.skill_build_service = SkillBuildService(settings=settings)
         self._run_chat_map: dict[str, str] = {}
         self._pending_confirmations: dict[str, dict[str, Any]] = {}
         self._metrics_lock = threading.Lock()
@@ -87,8 +89,12 @@ class TelegramGateway:
         cmd = parse_telegram_command(text)
         if cmd is None:
             if self.settings.telegram_natural_mode_enabled:
-                response = self._submit_or_confirm_task(chat_id=chat_id, task=text)
-                self._record_command_metric("run", started)
+                if self._looks_like_skill_build_task(text):
+                    response = self._start_skill_build(chat_id=chat_id, task=text)
+                    self._record_command_metric("skill_build", started)
+                else:
+                    response = self._submit_or_confirm_task(chat_id=chat_id, task=text)
+                    self._record_command_metric("run", started)
                 self.client.send_message(chat_id, response)
             else:
                 self._record_command_metric("help", started)
@@ -138,6 +144,12 @@ class TelegramGateway:
             return self._resume(cmd.arg)
         if cmd.name == "pending":
             return self._pending(cmd.arg)
+        if cmd.name == "skill_build":
+            return self._start_skill_build(chat_id=chat_id, task=cmd.arg)
+        if cmd.name == "skill_status":
+            return self._skill_status(cmd.arg)
+        if cmd.name == "skill_builds":
+            return self._skill_builds()
         return help_text()
 
     def _submit_or_confirm_task(self, chat_id: str, task: str) -> str:
@@ -252,6 +264,109 @@ class TelegramGateway:
             r"คัดลอกไฟล์",
         ]
         return any(re.search(p, text) for p in risky_patterns)
+
+    def _looks_like_skill_build_task(self, task: str) -> bool:
+        text = (task or "").lower()
+        markers = (
+            "สร้าง skill",
+            "create skill",
+            "build skill",
+            "skill ตรวจสอบ",
+            "skill status",
+        )
+        return any(marker in text for marker in markers)
+
+    def _start_skill_build(self, chat_id: str, task: str) -> str:
+        raw = (task or "").strip()
+        if not raw:
+            return "Usage: /skill_build <task>"
+        if len(raw) > self.settings.telegram_max_task_chars:
+            return f"Task too long (max {self.settings.telegram_max_task_chars} chars)"
+        try:
+            item = self.skill_build_service.start_build({"task": raw})
+        except Exception as exc:
+            return f"Skill build error: {exc}"
+        job_id = str(item.get("id", ""))
+        skill_name = str(item.get("skill_name", "-"))
+        self._run_chat_map[f"skill-build:{job_id}"] = chat_id
+        monitor_key = f"skill-build:{job_id}"
+        monitor = threading.Thread(
+            target=self._monitor_skill_build_and_notify,
+            args=(job_id, chat_id, monitor_key),
+            daemon=True,
+        )
+        self.thread_registry[monitor_key] = monitor
+        monitor.start()
+        return (
+            f"Skill build started: {job_id}\n"
+            f"skill: {skill_name}\n"
+            f"status: {item.get('status', '-')}\n"
+            f"Use /skill_status {job_id}"
+        )
+
+    def _skill_status(self, job_id: str) -> str:
+        jid = (job_id or "").strip()
+        if not jid:
+            return "Usage: /skill_status <job_id>"
+        try:
+            item = self.skill_build_service.get_build(jid)
+        except FileNotFoundError:
+            return f"Skill build not found: {jid}"
+        lines = [
+            f"Skill build {jid}",
+            f"status: {item.get('status', '-')}",
+            f"stage: {item.get('stage', '-')}",
+            f"skill: {item.get('skill_name', '-')}",
+        ]
+        installed = str(item.get("installed_path") or "").strip()
+        if installed:
+            lines.append(f"installed_path: {installed}")
+        error = str(item.get("error") or "").strip()
+        if error:
+            lines.append(f"error: {error}")
+        return "\n".join(lines)
+
+    def _skill_builds(self) -> str:
+        items = self.skill_build_service.list_builds(limit=10)
+        if not items:
+            return "No skill build jobs"
+        lines = [f"Skill builds ({len(items)}):"]
+        for item in items:
+            lines.append(
+                f"- {item.get('id','-')} [{item.get('status','-')}] "
+                f"{item.get('skill_name','-')} stage={item.get('stage','-')}"
+            )
+        return "\n".join(lines)
+
+    def _monitor_skill_build_and_notify(self, job_id: str, chat_id: str, monitor_key: str) -> None:
+        deadline = time.time() + 300.0
+        try:
+            while time.time() < deadline:
+                try:
+                    item = self.skill_build_service.get_build(job_id)
+                except Exception as exc:
+                    self._increment_metric("command_errors")
+                    self._set_metric_value("last_error", f"skill build monitor error: {exc}")
+                    return
+                status = str(item.get("status", ""))
+                if status in {"completed", "failed"}:
+                    lines = [
+                        f"Skill build {job_id}: {status}",
+                        f"stage: {item.get('stage', '-')}",
+                        f"skill: {item.get('skill_name', '-')}",
+                    ]
+                    installed = str(item.get("installed_path") or "").strip()
+                    if installed:
+                        lines.append(f"installed_path: {installed}")
+                    error = str(item.get("error") or "").strip()
+                    if error:
+                        lines.append(f"error: {error}")
+                    self.client.send_message(chat_id, "\n".join(lines))
+                    return
+                time.sleep(0.5)
+            self.client.send_message(chat_id, f"Skill build {job_id}: still running, use /skill_status {job_id}")
+        finally:
+            self.thread_registry.pop(monitor_key, None)
 
     def _schedule_task(self, chat_id: str, text: str) -> str:
         raw = (text or "").strip()

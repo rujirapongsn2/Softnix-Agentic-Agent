@@ -32,6 +32,9 @@ Rules:
 - After execution, verify expected output with list_dir/read_file before done=true.
 - For done=true, provide `validations` whenever objective checks are known (especially output files).
 - If skill context provides `scripts/...`, prefer running that script instead of rewriting equivalent ad-hoc code.
+- For operational tasks (send email, call API, delete/mutate resources), inspection-only loops are insufficient; execute the operation and verify result evidence.
+- After installing dependencies, do not stop there; rerun the original objective command/script in the next action.
+- By iteration >= 2 for operational tasks, do not return preparatory-only actions (read_file/list_dir/date checks only).
 - For file actions, always use params.path (not file_path).
 - Use paths relative to workspace (e.g. "index.html", "assets/app.js"), never absolute paths.
 - For web fetch, use params.url with full http/https URL.

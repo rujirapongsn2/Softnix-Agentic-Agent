@@ -30,6 +30,25 @@ And scripts/b.sh
     assert len(parsed.references) == 2
 
 
+def test_parse_skill_metadata_success_artifacts(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "sendmail"
+    skill_dir.mkdir(parents=True)
+    skill = skill_dir / "SKILL.md"
+    skill.write_text(
+        """---
+name: sendmail
+description: send email
+success_artifacts:
+  - resend_email/result.json
+---
+Use sendmail skill.
+""",
+        encoding="utf-8",
+    )
+    parsed = parse_skill_file(skill)
+    assert parsed.success_artifacts == ["resend_email/result.json"]
+
+
 def test_loader_lists_skills(tmp_path: Path) -> None:
     d1 = tmp_path / "one"
     d1.mkdir(parents=True)
@@ -195,3 +214,65 @@ Use for web summary tasks.
     selected = loader.select_skills(task="ช่วยค้นหาข่าว AI วันนี้")
     names = [s.name for s in selected]
     assert "tavily-search" in names
+
+
+def test_loader_render_context_uses_absolute_script_paths_and_skills_dir_note(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "resend-email"
+    (skill_dir / "scripts").mkdir(parents=True)
+    script_file = skill_dir / "scripts" / "send_email.py"
+    script_file.write_text("print('ok')\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: resend-email
+description: send email by resend
+---
+Use script scripts/send_email.py
+""",
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(tmp_path)
+    text = loader.render_compact_context(task="", limit=5)
+    assert str(tmp_path.resolve()) in text
+    assert str(script_file.resolve()) in text
+
+
+def test_loader_select_skills_email_task_does_not_pull_unrelated_skills(tmp_path: Path) -> None:
+    resend = tmp_path / "resend-email"
+    resend.mkdir(parents=True)
+    (resend / "SKILL.md").write_text(
+        """---
+name: resend-email
+description: send email by resend api
+---
+Use for sending email.
+""",
+        encoding="utf-8",
+    )
+    web_summary = tmp_path / "web-summary"
+    web_summary.mkdir(parents=True)
+    (web_summary / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website from url
+---
+Use for website summary.
+""",
+        encoding="utf-8",
+    )
+    web_intel = tmp_path / "web-intel"
+    web_intel.mkdir(parents=True)
+    (web_intel / "SKILL.md").write_text(
+        """---
+name: web-intel
+description: collect dynamic website data
+---
+Use for dynamic pages.
+""",
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(tmp_path)
+    selected = loader.select_skills(task="ใช้ skill ส่งอีเมลไปที่ rujirapong@gmail.com")
+    names = [s.name for s in selected]
+    assert names == ["resend-email"]

@@ -12,6 +12,13 @@ import uvicorn
 from softnix_agentic_agent.config import load_settings
 from softnix_agentic_agent.providers.factory import create_provider
 from softnix_agentic_agent.runtime import build_runner
+from softnix_agentic_agent.skills.factory import (
+    SkillCreateRequest,
+    create_skill_scaffold,
+    normalize_skill_name,
+    validate_skill_dir,
+    validation_result_to_json,
+)
 from softnix_agentic_agent.skills.loader import SkillLoader
 
 app = typer.Typer(help="Softnix Agentic Agent CLI")
@@ -95,6 +102,80 @@ def list_skills(path: Path = typer.Option(Path("skillpacks"), "--path")) -> None
         typer.echo(f"- {skill.name}: {skill.description}")
         if skill.references:
             typer.echo(f"  refs: {', '.join(str(r) for r in skill.references[:3])}")
+
+
+@skills_app.command("create")
+def create_skill(
+    name: str = typer.Option(..., "--name", help="Skill name, e.g. order-status"),
+    description: str = typer.Option("", "--description", help="Short skill description"),
+    guidance: str = typer.Option("", "--guidance", help="Additional implementation guidance"),
+    api_key_name: str = typer.Option("", "--api-key-name", help="API key env var name, e.g. ORDER_API_KEY"),
+    api_key_value: str = typer.Option("", "--api-key-value", help="Initial API key value (stored in .secret/)"),
+    endpoint_template: str = typer.Option(
+        "/orders/{item_id}",
+        "--endpoint-template",
+        help="Endpoint template used by generated script",
+    ),
+    path: Path = typer.Option(Path("skillpacks"), "--path", help="Skills root directory"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing skill files"),
+) -> None:
+    req = SkillCreateRequest(
+        skills_root=path,
+        name=name,
+        description=description,
+        guidance=guidance,
+        api_key_name=api_key_name,
+        api_key_value=api_key_value,
+        endpoint_template=endpoint_template,
+        force=force,
+    )
+    result = create_skill_scaffold(req)
+    typer.echo(f"skill={result.skill_name}")
+    typer.echo(f"path={result.skill_dir}")
+    for file_path in result.created_files:
+        typer.echo(f"created: {file_path}")
+    for warning in result.warnings:
+        typer.echo(f"warning: {warning}")
+
+    validation = validate_skill_dir(result.skill_dir, run_smoke=True)
+    typer.echo(f"validate.ok={validation.ok}")
+    typer.echo(f"validate.ready={validation.ready}")
+    for check in validation.checks:
+        typer.echo(f"check: {check}")
+    for warning in validation.warnings:
+        typer.echo(f"warning: {warning}")
+    for error in validation.errors:
+        typer.echo(f"error: {error}")
+
+    if not validation.ok or not validation.ready:
+        raise typer.Exit(code=1)
+
+
+@skills_app.command("validate")
+def validate_skill(
+    name: str = typer.Option(..., "--name", help="Skill name, e.g. order-status"),
+    path: Path = typer.Option(Path("skillpacks"), "--path", help="Skills root directory"),
+    smoke: bool = typer.Option(True, "--smoke/--no-smoke", help="Run script smoke test when supported"),
+    output_json: bool = typer.Option(False, "--json", help="Print result as JSON"),
+) -> None:
+    target = path / normalize_skill_name(name)
+    result = validate_skill_dir(target, run_smoke=smoke)
+    if output_json:
+        typer.echo(validation_result_to_json(result))
+    else:
+        typer.echo(f"skill={name}")
+        typer.echo(f"path={target.resolve()}")
+        typer.echo(f"ok={result.ok}")
+        typer.echo(f"ready={result.ready}")
+        for check in result.checks:
+            typer.echo(f"check: {check}")
+        for warning in result.warnings:
+            typer.echo(f"warning: {warning}")
+        for error in result.errors:
+            typer.echo(f"error: {error}")
+
+    if not result.ok or not result.ready:
+        raise typer.Exit(code=1)
 
 
 @api_app.command("serve")

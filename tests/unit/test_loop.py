@@ -787,6 +787,181 @@ def test_loop_infer_output_files_excludes_skill_script_input_path(tmp_path: Path
     assert "web_intel/meta.json" in inferred
 
 
+def test_loop_infer_output_files_ignores_inline_code_identifiers(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    task = (
+        "ช่วยสร้าง skill send email โดยมีตัวอย่างโค้ด resend.api_key='re_xxx' "
+        "และส่งไปที่ rujirapong@gmail.com บนโดเมน resend.dev"
+    )
+    inferred = runner._infer_output_files_from_task(task)
+
+    assert "resend.api_key" not in inferred
+    assert "gmail.com" not in inferred
+    assert "resend.dev" not in inferred
+
+
+def test_loop_prepare_run_sanitizes_secret_and_writes_workspace_secret_file(tmp_path: Path) -> None:
+    raw_key = "re_testsecret_1234567890abcdef"
+    provider = FakeProvider(outputs=[{"done": True, "actions": [], "final_output": "ok"}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task=(
+            "ช่วยสร้าง skill send email โดยมีตัวอย่างโค้ด "
+            f"resend.api_key = \"{raw_key}\" และกำหนด RESEND_API_KEY={raw_key}"
+        ),
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert raw_key not in state.task
+    assert "<REDACTED:RESEND_API_KEY>" in state.task
+    assert ".secret/RESEND_API_KEY" in state.task
+    secret_file = tmp_path / ".secret" / "RESEND_API_KEY"
+    assert secret_file.exists()
+    assert secret_file.read_text(encoding="utf-8").strip() == raw_key
+    events = store.read_events(state.run_id)
+    assert any("security policy applied: secrets sanitized" in e for e in events)
+
+
+def test_loop_validation_resolves_suffix_path_from_produced_files(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "send-email/scripts/send_email.py", "content": "print('ok')\n"},
+                    }
+                ],
+                "validations": [{"type": "file_exists", "path": "scripts/send_email.py"}],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างไฟล์ send-email/scripts/send_email.py ให้ใช้งานได้",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.status == RunStatus.COMPLETED
+
+
+def test_loop_materializes_skill_file_for_read_file_action(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skillpacks"
+    skill_dir = skills_root / "resend-email"
+    script = skill_dir / "scripts" / "send_email.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: resend-email
+description: send email
+---
+Use scripts/send_email.py
+""",
+        encoding="utf-8",
+    )
+    script.write_text("print('mail-ok')\n", encoding="utf-8")
+
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [{"name": "read_file", "params": {"path": str(script.resolve())}}],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=skills_root)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ส่งอีเมลด้วย skill",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=skills_root,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.status == RunStatus.COMPLETED
+    assert (tmp_path / ".softnix_skill_exec" / "resend-email" / "scripts" / "send_email.py").exists()
+
+
+def test_loop_materializes_skill_file_for_shell_cat_action(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skillpacks"
+    skill_dir = skills_root / "resend-email"
+    script = skill_dir / "scripts" / "send_email.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: resend-email
+description: send email
+---
+Use scripts/send_email.py
+""",
+        encoding="utf-8",
+    )
+    script.write_text("print('mail-ok')\n", encoding="utf-8")
+
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [{"name": "run_shell_command", "params": {"command": f"cat {script.resolve()}"}}],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=skills_root,
+        safe_commands=["ls", "cat", "echo", "python"],
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ส่งอีเมลด้วย skill",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=skills_root,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.status == RunStatus.COMPLETED
+
+
 def test_loop_auto_complete_web_intel_task_with_skill_script_path_in_prompt(tmp_path: Path) -> None:
     provider = FakeProvider(
         outputs=[
@@ -1765,3 +1940,113 @@ def test_loop_logs_container_runtime_profile_auto_data_for_sendmail_task(tmp_pat
     assert state.stop_reason == StopReason.COMPLETED
     events = store.read_events(state.run_id)
     assert any("container runtime profile=data image=img-data" in e for e in events)
+
+
+def test_runtime_guidance_side_effect_task_requires_execution(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    text = runner._build_runtime_guidance(
+        task="ใช้ skill ส่งอีเมลขอลาพักร้อน",
+        workspace=tmp_path,
+        required_outputs=[],
+        produced_files=set(),
+        previous_actions=[],
+        previous_action_results=[],
+        objective_stagnation_streak=0,
+    )
+
+    assert "Execution objective" in text
+
+
+def test_runtime_guidance_after_pip_install_requests_rerun(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    previous_actions = [{"name": "run_shell_command", "params": {"command": "pip", "args": ["install", "resend"]}}]
+    previous_results = [{"name": "run_safe_command", "ok": True, "output": "Successfully installed resend", "error": None}]
+    text = runner._build_runtime_guidance(
+        task="ส่งอีเมลผ่าน resend",
+        workspace=tmp_path,
+        required_outputs=[],
+        produced_files=set(),
+        previous_actions=previous_actions,
+        previous_action_results=previous_results,
+        objective_stagnation_streak=0,
+    )
+
+    assert "Dependency installation succeeded" in text
+
+
+def test_loop_uses_skill_success_artifacts_as_required_outputs(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "resend-email"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: resend-email
+description: send email by resend api
+success_artifacts:
+  - resend_email/result.json
+---
+Use for sending email.
+""",
+        encoding="utf-8",
+    )
+
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ส่งอีเมลขอลาพักร้อน",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "missing: resend_email/result.json" in state.last_output
+
+
+def test_loop_execution_gate_replans_preparatory_only_plan(tmp_path: Path) -> None:
+    script = tmp_path / "send_email.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    provider = FakeProvider(
+        outputs=[
+            {"done": False, "actions": [{"name": "read_file", "params": {"path": "send_email.py"}}]},
+            {"done": False, "actions": [{"name": "read_file", "params": {"path": "send_email.py"}}]},
+            {
+                "done": True,
+                "final_output": "completed",
+                "actions": [{"name": "write_workspace_file", "params": {"path": "result.txt", "content": "ok"}}],
+            },
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ส่งอีเมลไปยังทีม",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=2,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("plan gate triggered iteration=2 reason=preparatory_only" in e for e in events)

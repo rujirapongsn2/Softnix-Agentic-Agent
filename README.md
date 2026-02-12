@@ -29,8 +29,10 @@ CLI-first agent framework ที่ทำงานตาม flow:
 - สำหรับ skill ที่ต้องใช้ API key ให้เก็บไฟล์ลับไว้ที่ `skillpacks/<skill-name>/.secret/`
 - ตัวอย่าง: `skillpacks/tavily-search/.secret/TAVILY_API_KEY`
 - ระบบจะ materialize ไฟล์ใน `.secret/` ไปยัง `.softnix_skill_exec/.../.secret/` ตอนรัน skill script โดยอัตโนมัติ
+- หาก task ของผู้ใช้มี API key ตรงๆ (เช่น `RESEND_API_KEY=...` หรือ `resend.api_key="..."`) ระบบจะ redact ก่อนส่งเข้า planner และย้ายค่าไปที่ `workspace/.secret/<KEY_NAME>` อัตโนมัติ
 - `.gitignore` ถูกตั้งค่าให้ไม่เก็บ `skillpacks/**/.secret/` ใน git
 - แนะนำให้ script รองรับทั้ง env var และไฟล์ `.secret` (env มาก่อน)
+- คำสั่ง `softnix skills validate` จะเตือนทันทีถ้าเจอโฟลเดอร์ legacy `.secrets/`
 
 ## Architecture Diagram
 
@@ -45,6 +47,7 @@ flowchart LR
     TG -->|Webhook| API
 
     API --> RUNAPI["Run API (/runs/*)"]
+    API --> SKBUILDAPI["Skill Build API (/skills/build*)"]
     API --> FILEAPI["File API (/files/upload)"]
     API --> SCHAPI["Schedule API (/schedules/*)"]
     API --> TGIN["Telegram API (/telegram/*)"]
@@ -59,6 +62,7 @@ flowchart LR
     SCHAPI --> SSTORE
     TGIN --> TGW
     TGW -->|/run| LOOP
+    TGW -->|/skill_build,/skill_status,/skill_builds| SKBUILDAPI
     TGW -->|/schedule,/schedules,/schedule_runs| SSTORE
     TGW --> TGCLIENT["Telegram Client"]
     TGCLIENT --> TG
@@ -66,9 +70,13 @@ flowchart LR
     LOOP --> PLAN["Planner"]
     PLAN --> PROVIDERS["LLM Providers (OpenAI/Claude/Custom)"]
     LOOP --> EXEC["Executor (safe actions)"]
-    LOOP --> SKILLS["Skill Loader (SKILL.md)"]
+    LOOP --> SKSEL["Skill Selector (task -> relevant skills)"]
+    SKSEL --> SKILLS["Skill Loader/Parser (SKILL.md)"]
     LOOP --> MEMORY["Core Memory Service"]
     LOOP --> STORE["Filesystem Store"]
+    SKBUILDAPI --> SKBUILD["Skill Build Service"]
+    SKBUILD --> SKBUILDSTORE[".softnix/skill-builds/<job_id>/"]
+    SKBUILD --> SKILLS
 
     MEMORY --> PROFILE["workspace/memory/PROFILE.md"]
     MEMORY --> SESSION["workspace/memory/SESSION.md"]
@@ -97,10 +105,11 @@ flowchart LR
 ลำดับการทำงานหลัก:
 1. รับ `task` จาก CLI หรือ Web UI
 2. Agent Core เริ่ม `Agent Loop` และเรียก `Planner` เพื่อขอแผนจาก LLM Provider
-3. `Safe Action Executor` ทำ action ที่อนุญาตและเขียนไฟล์ใน workspace
-4. `FilesystemStore` บันทึก state/iterations/events/artifacts ต่อเนื่องทุก iteration
-5. Core Memory update/resolve บริบทจาก `memory/PROFILE.md`/`memory/SESSION.md` แล้ว inject เข้า planner prompt
-6. API/Web UI อ่านสถานะล่าสุดและ timeline จาก run storage แบบ near real-time
+3. `Skill Selector` คัดเฉพาะ skill ที่เกี่ยวข้องจาก task แล้วส่งให้ `Skill Loader/Parser` สร้าง context/contract
+4. `Safe Action Executor` ทำ action ที่อนุญาตและเขียนไฟล์ใน workspace
+5. `FilesystemStore` บันทึก state/iterations/events/artifacts ต่อเนื่องทุก iteration
+6. Core Memory update/resolve บริบทจาก `memory/PROFILE.md`/`memory/SESSION.md` แล้ว inject เข้า planner prompt
+7. API/Web UI อ่านสถานะล่าสุดและ timeline จาก run storage แบบ near real-time
 
 ## ติดตั้ง
 
@@ -124,6 +133,7 @@ pip install -e '.[dev]'
 - `SOFTNIX_API_KEY` เปิด API key protection ให้ทุก endpoint (ยกเว้น `/health`, `/docs`, `/openapi.json`)
 - `SOFTNIX_CORS_ORIGINS` กำหนด origin ที่อนุญาต (comma-separated)
 - `SOFTNIX_CORS_ALLOW_CREDENTIALS` (`true`/`false`)
+- `SOFTNIX_SKILL_BUILDS_DIR` path เก็บ skill build jobs/staging logs (default `.softnix/skill-builds`)
 - `SOFTNIX_MAX_ITERS` จำนวน iteration สูงสุดต่อ run (hard cap ของ loop)
 - `SOFTNIX_EXEC_TIMEOUT_SEC` timeout ต่อ action ที่รันคำสั่ง/โค้ด
 - `SOFTNIX_EXEC_RUNTIME` โหมด execution runtime (`host` หรือ `container`)
@@ -200,7 +210,60 @@ softnix resume --run-id <run_id>
 softnix skills list --path skillpacks
 ```
 
-### 4) เปิด API
+### 4) Create skill scaffold (พร้อม `.secret` และ smoke test)
+
+```bash
+softnix skills create \
+  --path skillpacks \
+  --name "order-status" \
+  --description "check order status via API" \
+  --guidance "รับ order id จากผู้ใช้ แล้วสรุปสถานะสั้นๆ" \
+  --api-key-name ORDER_API_KEY \
+  --api-key-value "<REAL_KEY>" \
+  --endpoint-template "/orders/{item_id}"
+```
+
+ผลลัพธ์:
+- สร้างโครง `SKILL.md`, `scripts/check_status.py`, `references/NOTES.md`
+- เก็บ key ที่ `skillpacks/order-status/.secret/ORDER_API_KEY`
+- รัน `--self-test` อัตโนมัติ และ validate ความพร้อม
+
+### 5) Validate skill readiness
+
+```bash
+softnix skills validate --path skillpacks --name order-status --smoke --json
+```
+
+เงื่อนไขผ่าน:
+- โครงสร้าง skill ถูกต้อง
+- script compile ได้
+- smoke test ผ่าน (ถ้าเป็น template ที่รองรับ)
+- ไม่มีปัญหา `.secret` (เช่น key ว่าง/placeholder)
+
+### 6) Skill Build Job (no-code via API)
+
+กรณีต้องการให้ระบบ scaffold + validate + install skill อัตโนมัติแบบ asynchronous:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/skills/build \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "task":"ช่วยสร้าง skill ตรวจสอบสถานะคำสั่งซื้อ",
+    "api_key_name":"ORDER_API_KEY",
+    "api_key_value":"<REAL_KEY>",
+    "endpoint_template":"/orders/{item_id}",
+    "allow_overwrite":true
+  }'
+```
+
+ติดตามสถานะ:
+
+```bash
+curl -sS http://127.0.0.1:8787/skills/builds/<job_id>
+curl -sS http://127.0.0.1:8787/skills/builds/<job_id>/events
+```
+
+### 7) เปิด API
 
 ```bash
 softnix api serve --host 127.0.0.1 --port 8787
@@ -228,6 +291,10 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `POST /runs/{id}/cancel` ส่งคำขอหยุด run
 - `POST /runs/{id}/resume` สั่ง resume run
 - `GET /skills` อ่านรายการ skills
+- `POST /skills/build` เริ่ม skill build job (staging -> validate -> install)
+- `GET /skills/builds` อ่านรายการ skill build jobs
+- `GET /skills/builds/{job_id}` อ่านสถานะ skill build job
+- `GET /skills/builds/{job_id}/events` อ่าน timeline ของ skill build job
 - `GET /artifacts/{id}` อ่านรายการ artifacts
 - `GET /artifacts/{id}/{path}` ดาวน์โหลด artifact
 - `GET /health` ตรวจสถานะ provider connectivity/config
@@ -453,6 +520,9 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - `/help`
 - `วันนี้วันที่เท่าไหร่` (natural mode ไม่ต้องใช้ `/run`)
 - `/run สรุปเว็บไซต์ https://www.softnix.co.th/softnix-logger/`
+- `/skill_build ช่วยสร้าง skill ตรวจสอบสถานะคำสั่งซื้อ`
+- `/skill_status <job_id>`
+- `/skill_builds`
 - `/schedule ทุกวัน 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI`
 - `/schedules`
 - `/schedule_runs <schedule_id>`
@@ -469,6 +539,11 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - หากเป็นงานเสี่ยง (เช่น ลบไฟล์, ส่งอีเมล, ติดตั้ง package) bot จะขอ confirm ก่อนรัน
   - ตอบ `yes` หรือ `/yes` เพื่อยืนยัน
   - ตอบ `no` หรือ `/no` เพื่อยกเลิก
+
+พฤติกรรมหลัง `/skill_build`:
+- bot จะตอบ `Skill build started: <job_id>` ทันที
+- bot จะติดตามสถานะและส่งผลสรุปเมื่อ job จบ (`completed|failed`) อัตโนมัติ
+- สามารถเช็กสถานะเองได้ด้วย `/skill_status <job_id>` และดูรายการล่าสุดด้วย `/skill_builds`
 
 พฤติกรรมหลัง `/schedule`:
 - bot จะสร้าง schedule ให้ทันที และตอบ `Schedule created: <schedule_id>`

@@ -19,6 +19,9 @@ def help_text() -> str:
         "/cancel <run_id>\n"
         "/resume <run_id>\n"
         "/pending <run_id>\n"
+        "/skill_build <task>\n"
+        "/skill_status <job_id>\n"
+        "/skill_builds\n"
         "/help"
     )
 
