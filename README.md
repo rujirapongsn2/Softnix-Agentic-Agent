@@ -36,6 +36,7 @@ flowchart LR
     TG -->|Webhook| API
 
     API --> RUNAPI["Run API (/runs/*)"]
+    API --> FILEAPI["File API (/files/upload)"]
     API --> SCHAPI["Schedule API (/schedules/*)"]
     API --> TGIN["Telegram API (/telegram/*)"]
     API --> SCHWORKER["Scheduler Worker (background thread)"]
@@ -80,6 +81,7 @@ flowchart LR
     RUNS --> ARTIFACTS["artifacts/"]
 
     TGW -->|run status + artifacts| TG
+    WEB -->|Upload file| FILEAPI
     WEB -->|Artifacts download| API
 ```
 
@@ -113,14 +115,24 @@ pip install -e '.[dev]'
 - `SOFTNIX_API_KEY` เปิด API key protection ให้ทุก endpoint (ยกเว้น `/health`, `/docs`, `/openapi.json`)
 - `SOFTNIX_CORS_ORIGINS` กำหนด origin ที่อนุญาต (comma-separated)
 - `SOFTNIX_CORS_ALLOW_CREDENTIALS` (`true`/`false`)
+- `SOFTNIX_MAX_ITERS` จำนวน iteration สูงสุดต่อ run (hard cap ของ loop)
 - `SOFTNIX_EXEC_TIMEOUT_SEC` timeout ต่อ action ที่รันคำสั่ง/โค้ด
 - `SOFTNIX_EXEC_RUNTIME` โหมด execution runtime (`host` หรือ `container`)
 - `SOFTNIX_EXEC_CONTAINER_LIFECYCLE` lifecycle ของ container (`per_action` หรือ `per_run`)
 - `SOFTNIX_EXEC_CONTAINER_IMAGE` container image ที่ใช้เมื่อ runtime=container
+- `SOFTNIX_EXEC_CONTAINER_IMAGE_PROFILE` strategy เลือก image (`auto|base|web|data|scraping|ml|qa`)
+- `SOFTNIX_EXEC_CONTAINER_IMAGE_BASE` image สำหรับงานทั่วไป
+- `SOFTNIX_EXEC_CONTAINER_IMAGE_WEB` image สำหรับงาน web-centric
+- `SOFTNIX_EXEC_CONTAINER_IMAGE_DATA` image สำหรับงาน data/python libs
+- `SOFTNIX_EXEC_CONTAINER_IMAGE_SCRAPING` image สำหรับงาน scraping/browser-heavy
+- `SOFTNIX_EXEC_CONTAINER_IMAGE_ML` image สำหรับงาน machine learning
+- `SOFTNIX_EXEC_CONTAINER_IMAGE_QA` image สำหรับงาน QA/testing
 - `SOFTNIX_EXEC_CONTAINER_NETWORK` network mode ของ container runtime (แนะนำ `none`)
 - `SOFTNIX_EXEC_CONTAINER_CPUS` จำกัด CPU สำหรับ container runtime
 - `SOFTNIX_EXEC_CONTAINER_MEMORY` จำกัด memory สำหรับ container runtime
 - `SOFTNIX_EXEC_CONTAINER_PIDS_LIMIT` จำกัดจำนวน process ภายใน container
+- `SOFTNIX_EXEC_CONTAINER_CACHE_DIR` path cache สำหรับ dependency/runtime cache
+- `SOFTNIX_EXEC_CONTAINER_PIP_CACHE_ENABLED` เปิด/ปิด pip cache mount ใน container
 - `SOFTNIX_EXEC_CONTAINER_ENV_VARS` allowlist env vars ที่จะส่งเข้า container runtime (comma-separated, default `RESEND_API_KEY`)
 - `SOFTNIX_EXEC_CONTAINER_RUN_VENV_ENABLED` เปิด run-scoped virtualenv ใน container runtime (default `true`)
 - `SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_ENABLED` เปิด auto-install dependency เมื่อเจอ `ModuleNotFoundError` ใน container runtime (default `true`)
@@ -129,6 +141,9 @@ pip install -e '.[dev]'
 - `SOFTNIX_RUN_MAX_WALL_TIME_SEC` จำกัดเวลารวมต่อ run (second) เพื่อกันงานวนไม่จบ (default `900`)
 - `SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD` จำนวนครั้งติดกันของ `planner_parse_error` ก่อนหยุด (default `3`)
 - `SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD` จำนวนครั้งติดกันของ capability failure เดิมก่อนหยุด (default `4`)
+- `SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD` จำนวนรอบที่ objective ไม่คืบหน้าก่อนบังคับเข้า recovery guidance mode (default `3`)
+- `SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR` เปิด/ปิด planner retry ใน iteration เดียวกันเมื่อ parse JSON ไม่ผ่าน (default `true`)
+- `SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS` จำนวนความพยายามสูงสุดของ planner ต่อ iteration เมื่อเจอ parse error (default `2`)
 - `SOFTNIX_WEB_FETCH_TLS_VERIFY` เปิด/ปิด TLS certificate verification สำหรับ `web_fetch` (default `true`)
 - `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `memory/PROFILE.md`)
 - `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `memory/SESSION.md`)
@@ -188,6 +203,7 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `GET /runs/{id}/stream` stream ความคืบหน้าแบบ SSE
 - `GET /runs/{id}/stream?last_event_id=<n>` resume stream จาก event id ล่าสุด
 - `GET /runs/{id}/events` อ่าน events log
+- `POST /files/upload` อัปโหลดไฟล์เข้า workspace (payload: `filename`, `content_base64`, `path`)
 - `GET /runs/{id}/memory/pending` อ่าน inferred pending memory ที่รอการยืนยัน
 - `POST /runs/{id}/memory/confirm` ยืนยัน pending memory ด้วย key แบบ explicit
 - `POST /runs/{id}/memory/reject` ปฏิเสธ pending memory ด้วย key แบบ explicit
@@ -266,6 +282,7 @@ VITE_SOFTNIX_MEMORY_ADMIN_KEY=
 1. เปิดเบราว์เซอร์ที่ `http://127.0.0.1:5173`
 2. กรอก task แล้วกด `Start Run` (provider/model/max iterations ใช้ค่าจาก backend config)
 3. ดู conversation timeline และใช้ปุ่ม `Cancel`/`Resume` ได้ตรงนี้เลย
+4. ถ้าต้องใช้ไฟล์ input (เช่น PDF/CSV) ใช้กล่อง `Upload file to workspace` แล้วอ้าง path ที่ได้ใน task เช่น `inputs/invoice.pdf`
 
 ข้อจำกัดปัจจุบันของ Web UI:
 - ยังไม่มีหน้าจัดการ policy admin (reload ยังเรียกผ่าน API)
@@ -595,6 +612,7 @@ SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES=6
 - เมื่อ planner ตอบ `done=true` ระบบจะรัน objective validation ก่อนสรุปผลทุกครั้ง
 - รองรับ validation จากแผน (`plan.validations`) เช่น:
   - `{"type":"file_exists","path":"result.txt"}`
+  - `{"type":"file_non_empty","path":"result.txt"}`
   - `{"type":"text_in_file","path":"result.txt","contains":"success"}`
 - รองรับ `{"type":"python_import","path":"calculate_stats.py","module":"numpy"}` เพื่อบังคับการใช้ module เฉพาะในไฟล์ Python
 - auto-infer validation จาก task สำหรับ requirement library:
@@ -606,8 +624,10 @@ SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES=6
 - ระบบตรวจลูปซ้ำที่ไม่เกิดความคืบหน้า (plan/actions/results/output ซ้ำกันหลายรอบ)
 - หากเกิน threshold (`SOFTNIX_NO_PROGRESS_REPEAT_THRESHOLD`, default `3`) จะหยุด run ด้วย `stop_reason=no_progress`
 - หากเกิด `planner_parse_error` ต่อเนื่องเกิน threshold (`SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD`) จะหยุด run ด้วย `stop_reason=no_progress`
+- ก่อนนับ streak ระบบจะ retry planner ใน iteration เดิมได้ (reduced context) ตามค่า `SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR` / `SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS`
 - หากเกิด capability failure เดิมซ้ำ (เช่น missing module/binary, allowlist block) เกิน threshold (`SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD`) จะหยุด run ด้วย `stop_reason=no_progress`
 - หากเวลารวมเกิน `SOFTNIX_RUN_MAX_WALL_TIME_SEC` ระบบจะหยุด run เพื่อป้องกันงานค้างยาว
+- หาก objective ไม่คืบหน้าเกิน threshold (`SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD`) ระบบจะ inject recovery guidance ให้ planner เปลี่ยนกลยุทธ์ (เช่น path recovery / สร้าง output ที่ยังขาด)
 - event จะระบุ `signature=<hash>` และ `actions=<...>` เพื่อช่วย debug root cause ใน timeline
 - ช่วยลดการวนจน `max_iters` โดยไม่คืบหน้า
 

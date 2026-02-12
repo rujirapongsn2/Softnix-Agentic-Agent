@@ -78,6 +78,9 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_RUN_MAX_WALL_TIME_SEC=1200\n"
         "SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD=5\n"
         "SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD=6\n"
+        "SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD=7\n"
+        "SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR=false\n"
+        "SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS=4\n"
         "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n",
         encoding="utf-8",
     )
@@ -109,6 +112,9 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_RUN_MAX_WALL_TIME_SEC", raising=False)
     monkeypatch.delenv("SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD", raising=False)
+    monkeypatch.delenv("SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD", raising=False)
+    monkeypatch.delenv("SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR", raising=False)
+    monkeypatch.delenv("SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS", raising=False)
     monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
 
     settings = load_settings()
@@ -138,6 +144,9 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.run_max_wall_time_sec == 1200
     assert settings.planner_parse_error_streak_threshold == 5
     assert settings.capability_failure_streak_threshold == 6
+    assert settings.objective_stagnation_replan_threshold == 7
+    assert settings.planner_retry_on_parse_error is False
+    assert settings.planner_retry_max_attempts == 4
     assert settings.web_fetch_tls_verify is False
 
 

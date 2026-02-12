@@ -35,6 +35,41 @@ class BrokenJSONProvider(LLMProvider):
         return ProviderStatus(ok=True, message="ok")
 
 
+class FlakyJSONProvider(LLMProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, messages, model, tools=None, temperature=0.2, max_tokens=1024):  # type: ignore[override]
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(content="{invalid", usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12})
+        payload = {"done": True, "final_output": "ok", "actions": []}
+        return LLMResponse(content=json.dumps(payload), usage={"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11})
+
+    def healthcheck(self) -> ProviderStatus:
+        return ProviderStatus(ok=True, message="ok")
+
+
+class CapturingProvider(LLMProvider):
+    def __init__(self, outputs: list[dict]) -> None:
+        self.outputs = outputs
+        self.i = 0
+        self.user_prompts: list[str] = []
+
+    def generate(self, messages, model, tools=None, temperature=0.2, max_tokens=1024):  # type: ignore[override]
+        user_msg = ""
+        for m in messages:
+            if m.get("role") == "user":
+                user_msg = str(m.get("content", ""))
+        self.user_prompts.append(user_msg)
+        item = self.outputs[min(self.i, len(self.outputs) - 1)]
+        self.i += 1
+        return LLMResponse(content=json.dumps(item), usage={"total_tokens": 1})
+
+    def healthcheck(self) -> ProviderStatus:
+        return ProviderStatus(ok=True, message="ok")
+
+
 def test_loop_completes(tmp_path: Path) -> None:
     provider = FakeProvider(
         outputs=[
@@ -1049,6 +1084,42 @@ def test_loop_stops_on_repeated_capability_failure(tmp_path: Path) -> None:
     assert any("stopped: capability_block repeated=" in e for e in events)
 
 
+def test_loop_retries_planner_parse_error_and_recovers(tmp_path: Path) -> None:
+    provider = FlakyJSONProvider()
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        planner_retry_on_parse_error=True,
+        planner_retry_max_attempts=2,
+        planner_parse_error_streak_threshold=3,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="retry parse error once",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=3,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.status == RunStatus.COMPLETED
+    assert provider.calls >= 2
+    iterations = store.read_iterations(state.run_id)
+    assert len(iterations) == 1
+    token_usage = iterations[0].get("token_usage", {})
+    assert int(token_usage.get("total_tokens", 0)) >= 23
+    events = store.read_events(state.run_id)
+    assert any("planner retry attempt=2/2 mode=reduced_context" in e for e in events)
+    assert any("planner retry recovered attempt=2" in e for e in events)
+    assert any("metrics iteration=1" in e and "planner_attempts=2" in e for e in events)
+
+
 def test_loop_stops_on_run_wall_time_limit(tmp_path: Path, monkeypatch) -> None:
     provider = FakeProvider(outputs=[{"done": False, "actions": [{"name": "list_dir", "params": {"path": "."}}]}])
     planner = Planner(provider=provider, model="m")
@@ -1249,6 +1320,135 @@ def test_loop_auto_complete_does_not_use_stale_inferred_output_from_previous_run
     assert state.stop_reason == StopReason.MAX_ITERS
     events = store.read_events(state.run_id)
     assert not any("objective auto-completed from inferred validations" in e for e in events)
+
+
+def test_loop_infers_pdf_as_input_not_required_output(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    inferred = runner._infer_output_files_from_task(
+        "invoice.pdf แล้วเขียนผลเป็น JSON ลง result.json และสรุปลง result.txt"
+    )
+
+    assert "invoice.pdf" not in inferred
+    assert "result.json" in inferred
+    assert "result.txt" in inferred
+
+
+def test_loop_validation_blocks_empty_inferred_text_output(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "result.json", "content": ""},
+                    }
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียนผลลง result.json",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "output file is empty: result.json" in state.last_output
+
+
+def test_loop_validation_blocks_stale_inferred_output_not_produced_in_current_run(tmp_path: Path) -> None:
+    (tmp_path / "result.txt").write_text("stale", encoding="utf-8")
+
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียนผลลัพธ์ลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "inferred output not produced in this run: result.txt" in state.last_output
+
+
+def test_loop_runtime_guidance_includes_path_recovery_candidates(tmp_path: Path) -> None:
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    (inputs_dir / "invoice.pdf").write_text("dummy", encoding="utf-8")
+
+    provider = CapturingProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "read_file",
+                        "params": {"path": "invoice.pdf"},
+                    }
+                ],
+            },
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {"path": "result.json", "content": "{}"},
+                    }
+                ],
+                "final_output": "done",
+            },
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="จาก invoice.pdf แล้วเขียนผลลง result.json",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=2,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert len(provider.user_prompts) >= 2
+    second_prompt = provider.user_prompts[1]
+    assert "Previous iteration had missing file/path errors." in second_prompt
+    assert "Path recovery:" in second_prompt
+    assert "inputs/invoice.pdf" in second_prompt
 
 
 def test_loop_logs_container_runtime_profile_from_auto_selection(tmp_path: Path) -> None:

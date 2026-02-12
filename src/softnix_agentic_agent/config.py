@@ -50,6 +50,9 @@ class Settings:
     run_max_wall_time_sec: int = 900
     planner_parse_error_streak_threshold: int = 3
     capability_failure_streak_threshold: int = 4
+    objective_stagnation_replan_threshold: int = 3
+    planner_retry_on_parse_error: bool = True
+    planner_retry_max_attempts: int = 2
     web_fetch_tls_verify: bool = True
     memory_profile_file: str = "memory/PROFILE.md"
     memory_session_file: str = "memory/SESSION.md"
@@ -185,6 +188,12 @@ def load_settings() -> Settings:
         capability_failure_streak_threshold=int(
             os.getenv("SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD", "4")
         ),
+        objective_stagnation_replan_threshold=int(
+            os.getenv("SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD", "3")
+        ),
+        planner_retry_on_parse_error=os.getenv("SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR", "true").lower()
+        in {"1", "true", "yes", "on"},
+        planner_retry_max_attempts=int(os.getenv("SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS", "2")),
         web_fetch_tls_verify=os.getenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", "true").lower()
         in {"1", "true", "yes", "on"},
         memory_profile_file=os.getenv("SOFTNIX_MEMORY_PROFILE_FILE", "memory/PROFILE.md"),

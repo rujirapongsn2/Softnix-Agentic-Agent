@@ -13,19 +13,18 @@
 
 2. Autonomous code execution framework (No special-purpose tools)
 - เป้าหมาย: ให้ Agent วิเคราะห์ วางแผน เขียนโค้ด และรันโค้ดแบบอิสระเพื่อทำงานจนจบ โดยไม่เพิ่ม tool เฉพาะ domain
-- งานหลัก:
-  - สร้าง execution runtime/sandbox สำหรับรันโค้ด (resource limits: cpu/memory/timeout/disk)
-    - แผนถัดไป:
-      - ทำ benchmark เปรียบเทียบ profile/image แต่ละแบบ (duration/success rate/cost)
-      - เพิ่ม cold-start/warm-start metrics สำหรับ `per_run` เพื่อตัดสินใจ optimize lifecycle
-  - นิยาม action กลางสำหรับวงจร `generate -> run -> validate -> refine`
-  - เพิ่ม workspace governance (input/working/output zones + artifact snapshot)
-  - เพิ่ม safety policy สำหรับคำสั่งอิสระ (allow/deny + approval gate)
-  - เพิ่ม structured logs/traces สำหรับแผน โค้ด คำสั่ง และผลลัพธ์ต่อ iteration
-  - เพิ่ม objective validation checks และ stop conditions แบบ no-progress detection
-    - แผนถัดไป:
-      - เพิ่ม semantic success criteria (เช่น command exit expectations, artifact freshness per iteration)
-      - เพิ่ม objective contract จาก task parser ให้เข้มขึ้นสำหรับ task เชิงโปรแกรม
+- สถานะปัจจุบัน (เสร็จแล้ว):
+  - execution runtime/sandbox พร้อมใช้ทั้ง `host` และ `container` (`per_action`/`per_run`)
+  - action กลางสำหรับวงจร `generate -> run -> validate -> refine`
+  - workspace governance + artifact snapshot ใน run storage
+  - safety policy พื้นฐานสำหรับ command/action allowlist
+  - objective validation + no-progress detection + guard เพิ่มเติม (`planner_parse_error streak`, capability failure streak, wall-time limit)
+- งานคงเหลือ (ต้องทำต่อ):
+  - benchmark เปรียบเทียบ profile/image แต่ละแบบ (duration/success rate/cost)
+  - เพิ่ม cold-start/warm-start metrics สำหรับ `per_run` เพื่อตัดสินใจ optimize lifecycle
+  - เพิ่ม semantic success criteria (เช่น command exit expectations, artifact freshness per iteration)
+  - เพิ่ม objective contract จาก task parser ให้เข้มขึ้นสำหรับ task เชิงโปรแกรม
+  - เพิ่ม fallback planner/degraded planning path ให้ robust มากขึ้นสำหรับงานยาวและบริบทใหญ่ (เริ่มต้นแล้ว: retry-on-parse-error)
 - ผลลัพธ์: Agent ทำงาน data/code transformation แบบ end-to-end ได้ด้วยโค้ดที่สร้างเองอย่างปลอดภัยและตรวจสอบย้อนหลังได้
 
 ## P1 (ทำต่อหลัง P0)
@@ -129,15 +128,15 @@
 
 ## ลำดับแนะนำถัดไป (Next 3)
 
-1. Scheduled Runs / Cron Workflow (Phase 2: Hardening)
+1. Autonomous framework hardening (ต่อจาก P0-2)
+- เพิ่ม benchmark + metrics ของ runtime profile/image และ lifecycle `per_run`
+- เพิ่ม objective contract parser และ semantic success criteria
+- ลด planner parse error โดยเพิ่ม retry/degraded planning path ใน loop
+
+2. Scheduled Runs / Cron Workflow (Phase 2: Hardening)
 - เพิ่ม idempotency guard กัน dispatch ซ้ำใน due slot เดียวกัน
 - เพิ่ม retry/backoff พร้อม error classification
 - เพิ่ม scheduling metrics + audit events
-
-2. Web Intelligence Fallback (Phase 2: Decision Engine)
-- เพิ่ม quality gate decision engine ใน run flow (ไม่พึ่ง prompt อย่างเดียว)
-- เพิ่ม fallback reason trace/event ให้ตรวจสอบย้อนหลังได้
-- เพิ่ม per-domain dynamic policy + config
 
 3. Telegram Gateway Phase 2 (Hardening)
 - เพิ่ม rate limit / cooldown ต่อ chat เพื่อกัน abuse

@@ -59,6 +59,10 @@ Rules:
 - Avoid ending with code text only; prefer actionable steps that produce verifiable files/results.
 - Keep responses compact and valid JSON. Never wrap with ``` fences.
 - If content is long, split work into multiple iterations and use mode="append".
+- If runtime guidance is provided:
+  - prioritize it over repeating the same failed action sequence
+  - when file/path not found, discover actual location and continue execution with corrected path
+  - ensure each iteration makes measurable progress toward required outputs
 """.strip()
 
 
@@ -75,12 +79,14 @@ class Planner:
         previous_output: str,
         skills_context: str,
         memory_context: str = "",
+        runtime_guidance: str = "",
     ) -> tuple[dict[str, Any], dict[str, int], str]:
         compact_previous_output = _compact_previous_output(previous_output, max_chars=MAX_PREVIOUS_OUTPUT_CHARS)
         user_prompt = (
             f"Task: {task}\n"
             f"Iteration: {iteration}/{max_iters}\n"
             f"Previous output: {compact_previous_output or 'N/A'}\n"
+            f"Runtime guidance:\n{runtime_guidance or '- none'}\n"
             f"Memory:\n{memory_context or '- none'}\n"
             f"Skills:\n{skills_context}\n"
             "Return JSON plan now."

@@ -126,11 +126,15 @@ class AgentLoopRunner:
         previous_iteration_signature = ""
         repeated_iteration_count = 0
         produced_files_in_run: set[str] = set()
+        required_outputs = self._infer_output_files_from_task(state.task)
         previous_iteration_had_failed_action = False
+        previous_action_results: list[dict[str, Any]] = []
         run_started_at = time.monotonic()
         planner_parse_error_streak = 0
         capability_failure_streak = 0
         previous_capability_failure_fingerprint = ""
+        best_objective_progress_score = -1
+        objective_stagnation_streak = 0
 
         try:
             if state.iteration == 0:
@@ -190,6 +194,7 @@ class AgentLoopRunner:
                     return state
 
                 current_iteration = state.iteration + 1
+                iteration_started_at = time.perf_counter()
                 selected_skills = skill_loader.select_skills(task=state.task)
                 if selected_skills:
                     selected_names = ",".join(skill.name for skill in selected_skills)
@@ -198,14 +203,25 @@ class AgentLoopRunner:
                 self.store.log_event(state.run_id, f"skills selected iteration={current_iteration} names={selected_names}")
                 skills_context = skill_loader.render_compact_context(task=state.task)
                 memory_context = memory.build_prompt_context(max_items=self.settings.memory_prompt_max_items)
-                plan, token_usage, prompt_text = self.planner.build_plan(
+                runtime_guidance = self._build_runtime_guidance(
+                    workspace=Path(state.workspace),
+                    required_outputs=required_outputs,
+                    produced_files=produced_files_in_run,
+                    previous_action_results=previous_action_results,
+                    objective_stagnation_streak=objective_stagnation_streak,
+                )
+                plan_started_at = time.perf_counter()
+                plan, token_usage, prompt_text, planner_attempts = self._build_plan_with_retry(
+                    state=state,
                     task=state.task,
                     iteration=current_iteration,
                     max_iters=state.max_iters,
                     previous_output=state.last_output,
                     skills_context=skills_context,
                     memory_context=memory_context,
+                    runtime_guidance=runtime_guidance,
                 )
+                planner_ms = int((time.perf_counter() - plan_started_at) * 1000)
                 if self._is_planner_parse_error(plan):
                     planner_parse_error_streak += 1
                 else:
@@ -230,6 +246,11 @@ class AgentLoopRunner:
 
                 actions = plan.get("actions", []) if isinstance(plan.get("actions", []), list) else []
                 action_results = []
+                required_output_baseline = self._collect_required_output_baseline(
+                    workspace=Path(state.workspace),
+                    required_outputs=required_outputs,
+                )
+                actions_started_at = time.perf_counter()
                 for action in actions:
                     prepared_action = self._prepare_action(
                         action,
@@ -270,7 +291,16 @@ class AgentLoopRunner:
                             "error": result.error,
                         }
                     )
+                actions_ms = int((time.perf_counter() - actions_started_at) * 1000)
                 new_artifacts = self._snapshot_artifacts(state, actions, action_results)
+                new_artifacts.update(
+                    self._snapshot_updated_required_outputs(
+                        state=state,
+                        workspace=Path(state.workspace),
+                        required_outputs=required_outputs,
+                        baseline=required_output_baseline,
+                    )
+                )
                 produced_files_in_run.update(new_artifacts)
 
                 memory_metrics = memory.collect_metrics(
@@ -344,6 +374,21 @@ class AgentLoopRunner:
                     else:
                         self.store.log_event(state.run_id, "objective validation passed")
 
+                iteration_ms = int((time.perf_counter() - iteration_started_at) * 1000)
+                if isinstance(plan, dict):
+                    plan["timing"] = {
+                        "planner_ms": planner_ms,
+                        "actions_ms": actions_ms,
+                        "iteration_ms": iteration_ms,
+                        "planner_attempts": planner_attempts,
+                    }
+                self.store.log_event(
+                    state.run_id,
+                    "metrics iteration="
+                    f"{current_iteration} planner_ms={planner_ms} actions_ms={actions_ms} "
+                    f"total_ms={iteration_ms} planner_attempts={planner_attempts} actions_count={len(actions)}",
+                )
+
                 record = IterationRecord(
                     run_id=state.run_id,
                     iteration=current_iteration,
@@ -362,6 +407,7 @@ class AgentLoopRunner:
                 state.iteration = current_iteration
                 state.last_output = output
                 state.updated_at = utc_now_iso()
+                previous_action_results = action_results
 
                 if done:
                     state.status = RunStatus.COMPLETED
@@ -388,6 +434,29 @@ class AgentLoopRunner:
 
                 self.store.write_state(state)
                 previous_iteration_had_failed_action = has_failed_action
+                objective_progress = self._objective_progress_snapshot(
+                    workspace=Path(state.workspace),
+                    required_outputs=required_outputs,
+                    produced_files=produced_files_in_run,
+                )
+                progress_score = int(objective_progress.get("score", 0))
+                if progress_score > best_objective_progress_score:
+                    best_objective_progress_score = progress_score
+                    objective_stagnation_streak = 0
+                else:
+                    objective_stagnation_streak += 1
+                    threshold = max(2, int(self.settings.objective_stagnation_replan_threshold))
+                    if objective_stagnation_streak >= threshold:
+                        self.store.log_event(
+                            state.run_id,
+                            "objective stagnation detected "
+                            f"streak={objective_stagnation_streak} "
+                            f"required={objective_progress.get('required_total', 0)} "
+                            f"existing={objective_progress.get('existing_count', 0)} "
+                            f"non_empty={objective_progress.get('non_empty_count', 0)} "
+                            f"produced_required={objective_progress.get('produced_required_count', 0)} "
+                            f"produced={objective_progress.get('produced_count', 0)}",
+                        )
 
                 failure_fingerprint = self._build_capability_failure_fingerprint(action_results)
                 if failure_fingerprint:
@@ -441,6 +510,22 @@ class AgentLoopRunner:
 
             state.status = RunStatus.FAILED
             state.stop_reason = StopReason.MAX_ITERS
+            if required_outputs:
+                progress = self._objective_progress_snapshot(
+                    workspace=Path(state.workspace),
+                    required_outputs=required_outputs,
+                    produced_files=produced_files_in_run,
+                )
+                missing = ", ".join(progress.get("missing_paths", [])) or "-"
+                diag = (
+                    "[objective] incomplete at max_iters\n"
+                    f"- required_outputs: {progress.get('required_total', 0)}\n"
+                    f"- existing: {progress.get('existing_count', 0)}\n"
+                    f"- non_empty: {progress.get('non_empty_count', 0)}\n"
+                    f"- produced_in_run: {progress.get('produced_count', 0)}\n"
+                    f"- missing: {missing}"
+                )
+                state.last_output = (state.last_output + "\n\n" if state.last_output else "") + diag
             state.updated_at = utc_now_iso()
             self.store.write_state(state)
             self.store.log_event(state.run_id, "stopped: max_iters reached")
@@ -576,6 +661,55 @@ class AgentLoopRunner:
             seen.add(item)
             uniq.append(item)
         return uniq
+
+    def _collect_required_output_baseline(
+        self,
+        workspace: Path,
+        required_outputs: list[str],
+    ) -> dict[str, tuple[bool, int, int]]:
+        root = workspace.resolve()
+        baseline: dict[str, tuple[bool, int, int]] = {}
+        for rel in required_outputs:
+            target = (root / rel).resolve()
+            if not self._is_within_root(target, root):
+                baseline[rel] = (False, 0, 0)
+                continue
+            if not target.exists() or not target.is_file():
+                baseline[rel] = (False, 0, 0)
+                continue
+            stat = target.stat()
+            baseline[rel] = (True, int(stat.st_size), int(stat.st_mtime_ns))
+        return baseline
+
+    def _snapshot_updated_required_outputs(
+        self,
+        state: RunState,
+        workspace: Path,
+        required_outputs: list[str],
+        baseline: dict[str, tuple[bool, int, int]],
+    ) -> set[str]:
+        root = workspace.resolve()
+        snapshotted: set[str] = set()
+        for rel in required_outputs:
+            target = (root / rel).resolve()
+            if not self._is_within_root(target, root):
+                continue
+            if not target.exists() or not target.is_file():
+                continue
+            stat = target.stat()
+            prev_exists, prev_size, prev_mtime = baseline.get(rel, (False, 0, 0))
+            changed = (not prev_exists) or (int(stat.st_size) != prev_size) or (int(stat.st_mtime_ns) != prev_mtime)
+            if not changed:
+                continue
+            try:
+                path = self.store.snapshot_workspace_file(state.run_id, root, rel)
+                if path in snapshotted:
+                    continue
+                snapshotted.add(path)
+                self.store.log_event(state.run_id, f"artifact saved: {path}")
+            except Exception as exc:
+                self.store.log_event(state.run_id, f"artifact snapshot failed: {exc}")
+        return snapshotted
 
     def _evaluate_auto_complete_validations(
         self,
@@ -935,6 +1069,251 @@ class AgentLoopRunner:
         }
         return images.get(profile, default_image), profile
 
+    def _build_plan_with_retry(
+        self,
+        state: RunState,
+        task: str,
+        iteration: int,
+        max_iters: int,
+        previous_output: str,
+        skills_context: str,
+        memory_context: str,
+        runtime_guidance: str,
+    ) -> tuple[dict[str, Any], dict[str, int], str, int]:
+        retry_enabled = bool(self.settings.planner_retry_on_parse_error)
+        max_attempts = max(1, int(self.settings.planner_retry_max_attempts))
+        attempts = max_attempts if retry_enabled else 1
+        merged_usage: dict[str, int] = {}
+        last_plan: dict[str, Any] = {}
+        last_prompt = ""
+
+        for attempt in range(1, attempts + 1):
+            if attempt == 1:
+                cur_prev = previous_output
+                cur_skills = skills_context
+                cur_memory = memory_context
+                cur_guidance = runtime_guidance
+            else:
+                cur_prev = ""
+                cur_skills = self._degraded_skills_context(skills_context)
+                cur_memory = self._degraded_memory_context(memory_context)
+                cur_guidance = self._degraded_runtime_guidance(runtime_guidance)
+                self.store.log_event(
+                    state.run_id,
+                    f"planner retry attempt={attempt}/{attempts} mode=reduced_context",
+                )
+
+            plan, usage, prompt_text = self.planner.build_plan(
+                task=task,
+                iteration=iteration,
+                max_iters=max_iters,
+                previous_output=cur_prev,
+                skills_context=cur_skills,
+                memory_context=cur_memory,
+                runtime_guidance=cur_guidance,
+            )
+            merged_usage = self._merge_token_usage(merged_usage, usage)
+            last_plan = plan
+            last_prompt = prompt_text
+            if not self._is_planner_parse_error(plan):
+                if attempt > 1:
+                    self.store.log_event(
+                        state.run_id,
+                        f"planner retry recovered attempt={attempt}",
+                    )
+                return plan, merged_usage, prompt_text, attempt
+
+        return last_plan, merged_usage, last_prompt, attempts
+
+    def _degraded_skills_context(self, skills_context: str) -> str:
+        raw = (skills_context or "").strip()
+        if not raw:
+            return "- none"
+        lines = [line for line in raw.splitlines() if line.strip()]
+        keep = lines[: min(8, len(lines))]
+        keep.append("- (degraded mode) return strict valid JSON plan only")
+        return "\n".join(keep)
+
+    def _degraded_memory_context(self, memory_context: str) -> str:
+        raw = (memory_context or "").strip()
+        if not raw:
+            return "- none"
+        lines = [line for line in raw.splitlines() if line.strip()]
+        return "\n".join(lines[: min(8, len(lines))])
+
+    def _degraded_runtime_guidance(self, runtime_guidance: str) -> str:
+        raw = (runtime_guidance or "").strip()
+        if not raw:
+            return "- none"
+        lines = [line for line in raw.splitlines() if line.strip()]
+        return "\n".join(lines[: min(12, len(lines))])
+
+    def _merge_token_usage(self, current: dict[str, int], incoming: dict[str, int]) -> dict[str, int]:
+        merged = dict(current)
+        for k, v in (incoming or {}).items():
+            try:
+                merged[k] = int(merged.get(k, 0)) + int(v)
+            except Exception:
+                continue
+        return merged
+
+    def _build_runtime_guidance(
+        self,
+        workspace: Path,
+        required_outputs: list[str],
+        produced_files: set[str],
+        previous_action_results: list[dict[str, Any]],
+        objective_stagnation_streak: int,
+    ) -> str:
+        guidance: list[str] = []
+        progress = self._objective_progress_snapshot(
+            workspace=workspace,
+            required_outputs=required_outputs,
+            produced_files=produced_files,
+        )
+
+        if required_outputs:
+            missing = progress.get("missing_paths", [])
+            guidance.append(
+                "Objective contract:"
+                f" required={progress.get('required_total', 0)}"
+                f" existing={progress.get('existing_count', 0)}"
+                f" non_empty={progress.get('non_empty_count', 0)}"
+                f" produced_required={progress.get('produced_required_count', 0)}"
+                f" produced_in_run={progress.get('produced_count', 0)}"
+            )
+            if missing:
+                guidance.append(f"Missing outputs: {', '.join(missing[:8])}")
+            stale = progress.get("stale_paths", [])
+            if stale:
+                guidance.append(f"Existing but stale outputs (must regenerate in this run): {', '.join(stale[:8])}")
+
+        missing_paths = self._extract_missing_paths_from_results(previous_action_results)
+        if missing_paths:
+            guidance.append("Previous iteration had missing file/path errors.")
+            for missing in missing_paths[:5]:
+                candidates = self._find_workspace_file_candidates(workspace=workspace, missing_path=missing, limit=3)
+                if candidates:
+                    guidance.append(f"Path recovery: {missing} -> candidates: {', '.join(candidates)}")
+                else:
+                    guidance.append(f"Path recovery: {missing} -> no candidates found yet")
+            guidance.append("Recovery policy: discover actual file path first, then continue execution with corrected path.")
+
+        threshold = max(2, int(self.settings.objective_stagnation_replan_threshold))
+        if objective_stagnation_streak >= threshold:
+            guidance.append(
+                "Stagnation detected: previous plans did not improve objective progress. "
+                "Re-plan with a different strategy and execute actions that create or validate required outputs."
+            )
+
+        if not guidance:
+            return "- none"
+        return "\n".join(guidance)
+
+    def _objective_progress_snapshot(
+        self,
+        workspace: Path,
+        required_outputs: list[str],
+        produced_files: set[str],
+    ) -> dict[str, Any]:
+        root = workspace.resolve()
+        existing_count = 0
+        non_empty_count = 0
+        produced_required_count = 0
+        missing_paths: list[str] = []
+        stale_paths: list[str] = []
+        for raw in required_outputs:
+            target = (root / raw).resolve()
+            if not self._is_within_root(target, root):
+                missing_paths.append(raw)
+                continue
+            if not target.exists() or not target.is_file():
+                missing_paths.append(raw)
+                continue
+            existing_count += 1
+            if raw in produced_files:
+                produced_required_count += 1
+            else:
+                stale_paths.append(raw)
+            require_non_empty = self._should_require_non_empty_output(raw)
+            if not require_non_empty:
+                non_empty_count += 1
+                continue
+            if target.stat().st_size > 0:
+                non_empty_count += 1
+            else:
+                missing_paths.append(raw)
+
+        produced_count = len(produced_files)
+        # Weighted score: prioritize required objective completion over side artifacts.
+        score = (produced_required_count * 4) + (existing_count * 2) + (non_empty_count * 3) + produced_count
+        return {
+            "required_total": len(required_outputs),
+            "existing_count": existing_count,
+            "non_empty_count": non_empty_count,
+            "produced_required_count": produced_required_count,
+            "produced_count": produced_count,
+            "missing_paths": missing_paths,
+            "stale_paths": stale_paths,
+            "score": score,
+        }
+
+    def _extract_missing_paths_from_results(self, action_results: list[dict[str, Any]]) -> list[str]:
+        paths: list[str] = []
+        patterns = [
+            re.compile(r"FileNotFoundError: .*?No such file or directory: ['\"]([^'\"]+)['\"]", flags=re.IGNORECASE),
+            re.compile(r"No such file or directory: ['\"]([^'\"]+)['\"]", flags=re.IGNORECASE),
+            re.compile(r"Not a file:\s*([^\n]+)", flags=re.IGNORECASE),
+        ]
+        for item in action_results:
+            if bool(item.get("ok", False)):
+                continue
+            blob = (str(item.get("error", "")) + "\n" + str(item.get("output", ""))).strip()
+            if not blob:
+                continue
+            for pattern in patterns:
+                for match in pattern.finditer(blob):
+                    candidate = match.group(1).strip()
+                    if candidate:
+                        paths.append(candidate)
+
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for path in paths:
+            normalized = path.strip().strip("'\"")
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            uniq.append(normalized)
+        return uniq
+
+    def _find_workspace_file_candidates(self, workspace: Path, missing_path: str, limit: int = 3) -> list[str]:
+        root = workspace.resolve()
+        text = (missing_path or "").strip()
+        if not text:
+            return []
+        src = Path(text)
+        basename = src.name.lower()
+        if not basename:
+            return []
+
+        matches: list[str] = []
+        try:
+            for child in root.rglob("*"):
+                if not child.is_file():
+                    continue
+                rel = str(child.relative_to(root))
+                if rel.startswith(".softnix/"):
+                    continue
+                if child.name.lower() != basename:
+                    continue
+                matches.append(rel)
+                if len(matches) >= limit:
+                    break
+        except Exception:
+            return []
+        return matches
+
     def _evaluate_objective_validations(
         self,
         task: str,
@@ -947,6 +1326,12 @@ class AgentLoopRunner:
             return {"ok": True, "failures": [], "checks": []}
 
         failures: list[str] = []
+        inferred_paths = self._infer_output_files_from_task(task)
+        if produced_files is not None and inferred_paths:
+            missing_in_run = sorted(path for path in inferred_paths if path not in produced_files)
+            for path in missing_in_run:
+                failures.append(f"inferred output not produced in this run: {path}")
+
         if produced_files is not None and self._task_requires_web_intel_contract(task):
             expected_web_intel_paths = {
                 str(item.get("path", "")).strip()
@@ -971,6 +1356,13 @@ class AgentLoopRunner:
             if ctype == "file_exists":
                 if not target.exists() or not target.is_file():
                     failures.append(f"missing output file: {path_text}")
+                continue
+            if ctype == "file_non_empty":
+                if not target.exists() or not target.is_file():
+                    failures.append(f"missing output file: {path_text}")
+                    continue
+                if target.stat().st_size <= 0:
+                    failures.append(f"output file is empty: {path_text}")
                 continue
             if ctype == "text_in_file":
                 if not target.exists() or not target.is_file():
@@ -1044,6 +1436,7 @@ class AgentLoopRunner:
                 value = str(item.get("value", ""))
                 if ctype in {
                     "file_exists",
+                    "file_non_empty",
                     "text_in_file",
                     "python_import",
                     "json_key_exists",
@@ -1063,6 +1456,8 @@ class AgentLoopRunner:
         inferred_files = self._infer_output_files_from_task(task)
         for path in inferred_files:
             checks.append({"type": "file_exists", "path": path})
+            if self._should_require_non_empty_output(path):
+                checks.append({"type": "file_non_empty", "path": path})
 
         lowered_task = (task or "").lower()
         if "pytest" in lowered_task:
@@ -1166,20 +1561,26 @@ class AgentLoopRunner:
             "output",
             "บันทึก",
             "สร้าง",
+            "เขียน",
             "เขียนผลลัพธ์",
+            "เขียนผลลง",
             "เขียนลง",
+            "ลงไฟล์",
         )
         lowered = text.lower()
         if not any(k in lowered for k in intent_keywords) and not is_web_intel_task:
             return []
 
         candidates = re.findall(r"([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)", text)
+        source_refs = self._infer_input_file_refs_from_task(text=text, candidates=candidates)
         files: list[str] = []
         for token in candidates:
             if "://" in token or token.startswith("www."):
                 continue
             if token.count(".") > 1 and "/" not in token:
                 # likely domain name, not workspace file
+                continue
+            if token in source_refs:
                 continue
             # Skill scripts referenced as command inputs (e.g. "python skillpacks/.../*.py")
             # are not output artifacts for objective validation.
@@ -1202,6 +1603,48 @@ class AgentLoopRunner:
             seen.add(f)
             uniq.append(f)
         return uniq
+
+    def _infer_input_file_refs_from_task(self, text: str, candidates: list[str]) -> set[str]:
+        lowered = (text or "").lower()
+        output_intents = ("write", "create", "generate", "save", "บันทึก", "สร้าง", "เขียน")
+        has_output_intent = any(k in lowered for k in output_intents)
+        source_exts = {
+            ".pdf",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".ppt",
+            ".pptx",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".tif",
+            ".tiff",
+            ".gif",
+            ".bmp",
+        }
+
+        source_refs: set[str] = set()
+        for token in candidates:
+            escaped = re.escape(token)
+            quoted = rf"[\"'“”‘’]?\s*{escaped}\s*[\"'“”‘’]?"
+            input_patterns = (
+                rf"(?:from|read|use|using|input|source|extract(?:ed)?\s+from)\s+{quoted}",
+                rf"(?:จาก|อ่าน|ใช้|อินพุต|ไฟล์ต้นฉบับ|จากไฟล์)\s*{quoted}",
+            )
+            if any(re.search(p, text, flags=re.IGNORECASE) for p in input_patterns):
+                source_refs.add(token)
+                continue
+
+            if has_output_intent and Path(token).suffix.lower() in source_exts:
+                source_refs.add(token)
+
+        return source_refs
+
+    def _should_require_non_empty_output(self, path: str) -> bool:
+        ext = Path(path).suffix.lower()
+        return ext in {".txt", ".md", ".json", ".csv", ".html", ".xml", ".yaml", ".yml", ".log"}
 
     def _looks_like_skill_script_input_ref(self, task: str, token: str) -> bool:
         lowered_token = (token or "").strip().lower().replace("\\", "/")
