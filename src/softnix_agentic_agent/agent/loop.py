@@ -510,6 +510,21 @@ class AgentLoopRunner:
 
             state.status = RunStatus.FAILED
             state.stop_reason = StopReason.MAX_ITERS
+            if self._should_auto_complete_answer_only_on_max_iters(
+                task=state.task,
+                required_outputs=required_outputs,
+                last_output=state.last_output,
+                last_action_results=previous_action_results,
+            ):
+                state.status = RunStatus.COMPLETED
+                state.stop_reason = StopReason.COMPLETED
+                state.updated_at = utc_now_iso()
+                self.store.write_state(state)
+                self.store.log_event(
+                    state.run_id,
+                    "objective auto-completed at max_iters for answer-only task",
+                )
+                return state
             if required_outputs:
                 progress = self._objective_progress_snapshot(
                     workspace=Path(state.workspace),
@@ -734,6 +749,78 @@ class AgentLoopRunner:
             produced_files=produced_files,
         )
 
+    def _should_auto_complete_answer_only_on_max_iters(
+        self,
+        task: str,
+        required_outputs: list[str],
+        last_output: str,
+        last_action_results: list[dict[str, Any]],
+    ) -> bool:
+        if required_outputs:
+            return False
+        if not self._is_answer_only_task(task):
+            return False
+        output = (last_output or "").strip()
+        if not output:
+            return False
+        lowered = output.lower()
+        if "[validation] failed" in lowered or "planner_parse_error" in lowered:
+            return False
+        if any(not bool(item.get("ok", False)) for item in last_action_results):
+            return False
+        return True
+
+    def _is_answer_only_task(self, task: str) -> bool:
+        text = (task or "").lower()
+        if not text:
+            return False
+        write_or_side_effect_markers = (
+            "เขียน",
+            "สร้างไฟล์",
+            "บันทึก",
+            "save",
+            "write",
+            "create",
+            "script",
+            ".py",
+            ".md",
+            ".txt",
+            ".json",
+            ".csv",
+            "run ",
+            "execute",
+            "ติดตั้ง",
+            "install",
+            "ลบ",
+            "delete",
+            "remove",
+            "ส่งอีเมล",
+            "send email",
+            "email",
+        )
+        if any(marker in text for marker in write_or_side_effect_markers):
+            return False
+
+        answer_markers = (
+            "สรุป",
+            "summary",
+            "อธิบาย",
+            "explain",
+            "วิเคราะห์",
+            "analy",
+            "ข่าว",
+            "news",
+            "คืออะไร",
+            "what is",
+            "วันนี้วันที่เท่าไหร่",
+            "date today",
+        )
+        if any(marker in text for marker in answer_markers):
+            return True
+        if ("http://" in text) or ("https://" in text) or ("www." in text):
+            return True
+        return False
+
     def _build_iteration_signature(
         self,
         actions: list[dict[str, Any]],
@@ -857,7 +944,13 @@ class AgentLoopRunner:
             if skill_script is not None and skill_script.suffix == ".py":
                 rel = skill_script.relative_to(skills_root.resolve())
                 params["path"] = str(Path(".softnix_skill_exec") / rel)
-                params["code"] = skill_script.read_text(encoding="utf-8")
+                script_code = skill_script.read_text(encoding="utf-8")
+                secret_files = self._collect_skill_secret_files(skill_script=skill_script, skills_root=skills_root)
+                params["code"] = self._with_embedded_files_prelude(
+                    script_code,
+                    embedded_files=secret_files,
+                    var_name="__softnix_skill_secret_files",
+                )
                 params["skill_source_path"] = str(skill_script)
             else:
                 code_text = str(params.get("code", ""))
@@ -983,6 +1076,11 @@ class AgentLoopRunner:
             exec_rel = str(Path(".softnix_skill_exec") / rel).replace("\\", "/")
             replacements[raw_path] = exec_rel
             embedded_files[exec_rel] = resolved.read_text(encoding="utf-8")
+            for sec_path, sec_content in self._collect_skill_secret_files(
+                skill_script=resolved,
+                skills_root=skills_root,
+            ).items():
+                embedded_files[sec_path] = sec_content
 
         if not replacements:
             return code
@@ -992,23 +1090,102 @@ class AgentLoopRunner:
             rewritten = rewritten.replace(f"'{src}'", repr(dst))
             rewritten = rewritten.replace(f'"{src}"', repr(dst))
 
+        return self._with_embedded_files_prelude(
+            rewritten,
+            embedded_files=embedded_files,
+            var_name="__softnix_skill_files",
+        )
+
+    def _collect_skill_secret_files(self, skill_script: Path, skills_root: Path) -> dict[str, str]:
+        root = skills_root.resolve()
+        script = skill_script.resolve()
+        if not self._is_within_root(script, root):
+            return {}
+        rel = script.relative_to(root)
+        parts = rel.parts
+        if not parts:
+            return {}
+        skill_name = parts[0]
+        secret_dir = (root / skill_name / ".secret").resolve()
+        if not self._is_within_root(secret_dir, root):
+            return {}
+        if not secret_dir.exists() or not secret_dir.is_dir():
+            return {}
+
+        files: dict[str, str] = {}
+        for candidate in sorted(secret_dir.rglob("*")):
+            if not candidate.is_file():
+                continue
+            try:
+                rel_secret = candidate.relative_to(root / skill_name)
+            except Exception:
+                continue
+            exec_rel = str(Path(".softnix_skill_exec") / skill_name / rel_secret).replace("\\", "/")
+            files[exec_rel] = candidate.read_text(encoding="utf-8")
+        return files
+
+    def _with_embedded_files_prelude(
+        self,
+        code: str,
+        embedded_files: dict[str, str],
+        var_name: str = "__softnix_skill_files",
+    ) -> str:
+        if not embedded_files:
+            return code
         prelude_lines = [
             "from pathlib import Path as __softnix_Path",
-            "__softnix_skill_files = {",
+            f"{var_name} = {{",
         ]
         for path, content in embedded_files.items():
             prelude_lines.append(f"    {repr(path)}: {repr(content)},")
         prelude_lines.extend(
             [
                 "}",
-                "for __p, __c in __softnix_skill_files.items():",
+                f"for __p, __c in {var_name}.items():",
                 "    __t = __softnix_Path(__p)",
                 "    __t.parent.mkdir(parents=True, exist_ok=True)",
                 "    __t.write_text(__c, encoding='utf-8')",
                 "",
             ]
         )
-        return "\n".join(prelude_lines) + rewritten
+        prelude = "\n".join(prelude_lines)
+        return self._insert_prelude_after_future_imports(code=code, prelude=prelude)
+
+    def _insert_prelude_after_future_imports(self, code: str, prelude: str) -> str:
+        source = code or ""
+        if not source.strip():
+            return prelude
+        try:
+            tree = ast.parse(source)
+        except Exception:
+            return prelude + source
+
+        insert_after_line = 0
+        for node in tree.body:
+            is_docstring = (
+                isinstance(node, ast.Expr)
+                and isinstance(getattr(node, "value", None), ast.Constant)
+                and isinstance(getattr(node.value, "value", None), str)
+            )
+            if is_docstring:
+                insert_after_line = max(insert_after_line, int(getattr(node, "end_lineno", node.lineno)))
+                continue
+
+            is_future = isinstance(node, ast.ImportFrom) and str(getattr(node, "module", "")) == "__future__"
+            if is_future:
+                insert_after_line = max(insert_after_line, int(getattr(node, "end_lineno", node.lineno)))
+                continue
+            break
+
+        if insert_after_line <= 0:
+            return prelude + source
+
+        lines = source.splitlines(keepends=True)
+        prefix = "".join(lines[:insert_after_line])
+        suffix = "".join(lines[insert_after_line:])
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        return prefix + prelude + suffix
 
     def _resolve_container_runtime_image(self, task: str, selected_skills: list[Any]) -> tuple[str, str]:
         default_image = self.settings.exec_container_image

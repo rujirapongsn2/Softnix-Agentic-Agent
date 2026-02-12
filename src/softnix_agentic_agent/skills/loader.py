@@ -7,6 +7,19 @@ from softnix_agentic_agent.skills.parser import SkillDefinition, parse_skill_fil
 
 
 class SkillLoader:
+    _DOMAIN_STOPWORDS = {
+        "www",
+        "http",
+        "https",
+        "com",
+        "co",
+        "th",
+        "net",
+        "org",
+        "ai",
+        "io",
+    }
+
     def __init__(self, skills_root: Path) -> None:
         self.skills_root = skills_root
 
@@ -57,16 +70,84 @@ class SkillLoader:
         if not task_text:
             return skills
 
-        task_tokens = {t for t in re.findall(r"[a-z0-9ก-๙_-]+", task_text) if len(t) >= 2}
+        task_tokens = self._extract_task_tokens(task_text)
+        explicit_mentions = self._extract_explicit_skill_mentions(task_text=task_text)
+        task_has_url = (
+            "http://" in task_text
+            or "https://" in task_text
+            or bool(re.search(r"\bwww\.[a-z0-9.-]+", task_text))
+        )
+        task_has_search_intent = self._task_has_search_intent(task_text)
 
-        def score(skill: SkillDefinition) -> tuple[int, str]:
+        def score(skill: SkillDefinition) -> tuple[int, int, str]:
             blob = f"{skill.name} {skill.description} {skill.body}".lower()
-            token_hits = sum(1 for t in task_tokens if t in blob)
-            url_bonus = 2 if ("http://" in task_text or "https://" in task_text) and "web" in blob else 0
-            return (token_hits + url_bonus, skill.name.lower())
+            name_desc_blob = f"{skill.name} {skill.description}".lower()
+            token_hits = sum(1 for t in task_tokens if self._token_in_blob(token=t, blob=blob))
+            intent_bonus = 2 if task_has_search_intent and self._is_search_or_news_skill(name_desc_blob) else 0
+            url_bonus = 2 if task_has_url and self._is_web_related(blob) else 0
+            if task_has_url and (not task_has_search_intent) and self._is_search_or_news_skill(name_desc_blob):
+                url_bonus = 0
+            explicit_bonus = 100 if skill.name.lower() in explicit_mentions else 0
+            total = token_hits + intent_bonus + url_bonus + explicit_bonus
+            # Keep components in tuple for deterministic sorting and filtering.
+            return (total, token_hits + intent_bonus + url_bonus, skill.name.lower())
 
-        scored = sorted(skills, key=score, reverse=True)
-        return scored
+        scored_rows: list[tuple[SkillDefinition, tuple[int, int, str]]] = []
+        for skill in skills:
+            scored_rows.append((skill, score(skill)))
+        scored_rows.sort(key=lambda item: item[1], reverse=True)
+
+        filtered: list[SkillDefinition] = []
+        for skill, (total, non_explicit_score, _) in scored_rows:
+            # Keep explicitly requested skills even if lexical score is low.
+            if skill.name.lower() in explicit_mentions:
+                filtered.append(skill)
+                continue
+            # Keep only relevant skills; this avoids pulling unrelated skill context every run.
+            if non_explicit_score > 0:
+                filtered.append(skill)
+
+        return filtered
+
+    def _extract_explicit_skill_mentions(self, task_text: str) -> set[str]:
+        mentions: set[str] = set()
+        for match in re.findall(r"\$([a-z0-9][a-z0-9_-]{1,63})", task_text):
+            mentions.add(match.lower())
+        return mentions
+
+    def _extract_task_tokens(self, task_text: str) -> set[str]:
+        raw_tokens = {t for t in re.findall(r"[a-z0-9ก-๙_-]+", task_text) if len(t) >= 2}
+        normalized: set[str] = set()
+        for token in raw_tokens:
+            if token in self._DOMAIN_STOPWORDS:
+                continue
+            if re.fullmatch(r"[a-z0-9_-]+", token) and len(token) < 3:
+                continue
+            normalized.add(token)
+        return normalized
+
+    def _token_in_blob(self, token: str, blob: str) -> bool:
+        if re.search(r"[ก-๙]", token):
+            return token in blob
+        return bool(re.search(rf"(?<![a-z0-9_-]){re.escape(token)}(?![a-z0-9_-])", blob))
+
+    def _is_web_related(self, blob: str) -> bool:
+        english_keywords = ("web", "website", "url", "browser", "crawl", "fetch", "search", "news")
+        for keyword in english_keywords:
+            if re.search(rf"(?<![a-z0-9_-]){re.escape(keyword)}(?![a-z0-9_-])", blob):
+                return True
+        return ("เว็บไซต์" in blob) or ("เว็บ" in blob)
+
+    def _is_search_or_news_skill(self, blob: str) -> bool:
+        english_markers = ("tavily", "search", "query", "news")
+        for marker in english_markers:
+            if re.search(rf"(?<![a-z0-9_-]){re.escape(marker)}(?![a-z0-9_-])", blob):
+                return True
+        return ("ข่าว" in blob) or ("ค้นหา" in blob)
+
+    def _task_has_search_intent(self, task_text: str) -> bool:
+        markers = ("search", "query", "find", "news", "ค้นหา", "ข่าว", "หาให้")
+        return any(marker in task_text for marker in markers)
 
     def _short_body_excerpt(self, body: str, max_lines: int = 4) -> str:
         rows = []

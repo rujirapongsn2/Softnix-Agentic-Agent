@@ -119,6 +119,63 @@ def test_loop_max_iters(tmp_path: Path) -> None:
     assert state.iteration == 2
 
 
+def test_loop_auto_completes_answer_only_task_at_max_iters(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "final_output": "สรุปข้อมูลจากเว็บเรียบร้อย",
+                "actions": [],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยสรุปข้อมูลสินค้าและบริการใน www.softnix.co.th",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert state.status == RunStatus.COMPLETED
+    assert state.iteration == 1
+
+
+def test_loop_does_not_auto_complete_side_effect_task_at_max_iters(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "final_output": "จะสร้างไฟล์ result.txt",
+                "actions": [],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างไฟล์ result.txt แล้วบันทึกผล",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert state.status == RunStatus.FAILED
+
+
 def test_loop_write_workspace_file_is_snapshotted_as_artifact(tmp_path: Path) -> None:
     provider = FakeProvider(
         outputs=[
@@ -982,6 +1039,57 @@ def test_prepare_action_rewrites_embedded_skill_script_paths_in_python_code(tmp_
     assert ".softnix_skill_exec/web-intel/scripts/web_intel_fetch.py" in rewritten
     assert "skills/web-intel/scripts/web_intel_fetch.py" not in rewritten
     assert "web-intel-from-skill" in rewritten
+
+
+def test_prepare_action_embeds_skill_secret_files_for_skill_script_execution(tmp_path: Path) -> None:
+    skill_root = tmp_path / "skills"
+    script = skill_root / "tavily-search" / "scripts" / "tavily_search.py"
+    secret = skill_root / "tavily-search" / ".secret" / "TAVILY_API_KEY"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("print('tavily')\n", encoding="utf-8")
+    secret.write_text("tvly-test-key\n", encoding="utf-8")
+
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=skill_root)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    prepared = runner._prepare_action(
+        {"name": "run_python_code", "params": {"path": "tavily-search/scripts/tavily_search.py"}},
+        task="search web",
+        workspace=tmp_path,
+        skills_root=skill_root,
+    )
+
+    params = prepared["params"]
+    rewritten = str(params["code"])
+    assert params["path"] == ".softnix_skill_exec/tavily-search/scripts/tavily_search.py"
+    assert "__softnix_skill_secret_files" in rewritten
+    assert ".softnix_skill_exec/tavily-search/.secret/TAVILY_API_KEY" in rewritten
+    assert "tvly-test-key" in rewritten
+
+
+def test_prelude_insertion_keeps_future_import_at_top(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    code = (
+        "from __future__ import annotations\n"
+        "import os\n"
+        "print('ok')\n"
+    )
+    prelude = "from pathlib import Path as __softnix_Path\nprint('p')\n"
+    merged = runner._insert_prelude_after_future_imports(code=code, prelude=prelude)
+    first_line = merged.splitlines()[0]
+    assert first_line == "from __future__ import annotations"
+    assert "__softnix_Path" in merged
+    assert merged.index("__softnix_Path") > merged.index("from __future__ import annotations")
+    compile(merged, "<merged>", "exec")
 
 
 def test_loop_stops_with_no_progress_before_max_iters(tmp_path: Path) -> None:

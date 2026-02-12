@@ -270,3 +270,85 @@ def test_gateway_schedule_disable_and_delete(tmp_path: Path) -> None:
         {"update_id": 3, "message": {"chat": {"id": 8388377631}, "text": f"/schedule_delete {schedule_id}"}}
     )
     assert "Schedule deleted" in fake_client.sent_messages[-1][1]
+
+
+def test_gateway_natural_mode_runs_task_without_run_prefix(tmp_path: Path, monkeypatch) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=False,
+    )
+    fake_client = FakeTelegramClient()
+    threads: dict[str, threading.Thread] = {}
+    fake_runner = FakeRunner(store=store, workspace=tmp_path)
+
+    monkeypatch.setattr(
+        "softnix_agentic_agent.integrations.telegram_gateway.build_runner",
+        lambda settings, provider_name, model=None: fake_runner,
+    )
+
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry=threads, client=fake_client)
+    ok = gateway.handle_update(
+        {
+            "update_id": 20,
+            "message": {"chat": {"id": 8388377631}, "text": "วันนี้วันที่เท่าไหร่"},
+        }
+    )
+    assert ok is True
+    assert "tg-run-1" in threads
+    threads["tg-run-1"].join(timeout=2)
+    assert any("Started run: tg-run-1" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_risky_task_requires_confirmation_then_yes_runs(tmp_path: Path, monkeypatch) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=True,
+    )
+    fake_client = FakeTelegramClient()
+    threads: dict[str, threading.Thread] = {}
+    fake_runner = FakeRunner(store=store, workspace=tmp_path)
+
+    monkeypatch.setattr(
+        "softnix_agentic_agent.integrations.telegram_gateway.build_runner",
+        lambda settings, provider_name, model=None: fake_runner,
+    )
+
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry=threads, client=fake_client)
+    first = gateway.handle_update(
+        {
+            "update_id": 21,
+            "message": {"chat": {"id": 8388377631}, "text": "ช่วยลบไฟล์ result.txt"},
+        }
+    )
+    assert first is True
+    assert any("Risky task detected" in text for _, text in fake_client.sent_messages)
+    assert "tg-run-1" not in threads
+
+    second = gateway.handle_update(
+        {
+            "update_id": 22,
+            "message": {"chat": {"id": 8388377631}, "text": "yes"},
+        }
+    )
+    assert second is True
+    assert "tg-run-1" in threads
+    threads["tg-run-1"].join(timeout=2)
+    assert any("Started run: tg-run-1" in text for _, text in fake_client.sent_messages)

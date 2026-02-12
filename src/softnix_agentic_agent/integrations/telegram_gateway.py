@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
@@ -38,6 +39,7 @@ class TelegramGateway:
         self._next_offset = 0
         self.schedule_store = ScheduleStore(settings.scheduler_dir)
         self._run_chat_map: dict[str, str] = {}
+        self._pending_confirmations: dict[str, dict[str, Any]] = {}
         self._metrics_lock = threading.Lock()
         self._metrics: dict[str, Any] = {
             "commands_total": 0,
@@ -76,10 +78,21 @@ class TelegramGateway:
             self.client.send_message(chat_id, "Unauthorized chat")
             return True
 
+        confirm_response = self._handle_pending_confirmation(chat_id=chat_id, text=text)
+        if confirm_response is not None:
+            self._record_command_metric("confirm", started)
+            self.client.send_message(chat_id, confirm_response)
+            return True
+
         cmd = parse_telegram_command(text)
         if cmd is None:
-            self._record_command_metric("help", started)
-            self.client.send_message(chat_id, help_text())
+            if self.settings.telegram_natural_mode_enabled:
+                response = self._submit_or_confirm_task(chat_id=chat_id, task=text)
+                self._record_command_metric("run", started)
+                self.client.send_message(chat_id, response)
+            else:
+                self._record_command_metric("help", started)
+                self.client.send_message(chat_id, help_text())
             return True
 
         try:
@@ -102,7 +115,11 @@ class TelegramGateway:
         if cmd.name == "help":
             return help_text()
         if cmd.name == "run":
-            return self._run_task(chat_id=chat_id, task=cmd.arg)
+            return self._submit_or_confirm_task(chat_id=chat_id, task=cmd.arg)
+        if cmd.name in {"yes", "confirm"}:
+            return self._confirm_pending(chat_id)
+        if cmd.name in {"no", "reject"}:
+            return self._reject_pending(chat_id)
         if cmd.name == "schedule":
             return self._schedule_task(chat_id=chat_id, text=cmd.arg)
         if cmd.name == "schedules":
@@ -122,6 +139,25 @@ class TelegramGateway:
         if cmd.name == "pending":
             return self._pending(cmd.arg)
         return help_text()
+
+    def _submit_or_confirm_task(self, chat_id: str, task: str) -> str:
+        raw = (task or "").strip()
+        if not raw:
+            return "Usage: /run <task>"
+        if len(raw) > self.settings.telegram_max_task_chars:
+            return f"Task too long (max {self.settings.telegram_max_task_chars} chars)"
+        if self.settings.telegram_risky_confirmation_enabled and self._looks_risky_task(raw):
+            self._pending_confirmations[chat_id] = {
+                "task": raw,
+                "created_at": time.time(),
+            }
+            preview = raw if len(raw) <= 160 else f"{raw[:157]}..."
+            return (
+                "Risky task detected. Confirm to continue?\n"
+                f"Task: {preview}\n"
+                "Reply: yes / no (or /yes /no)"
+            )
+        return self._run_task(chat_id=chat_id, task=raw)
 
     def _run_task(self, chat_id: str, task: str) -> str:
         raw = (task or "").strip()
@@ -147,6 +183,75 @@ class TelegramGateway:
         self.thread_registry[state.run_id] = thread
         thread.start()
         return started_text(state.run_id, raw)
+
+    def _handle_pending_confirmation(self, chat_id: str, text: str) -> str | None:
+        pending = self._pending_confirmations.get(chat_id)
+        if not pending:
+            return None
+        created = float(pending.get("created_at", 0.0))
+        ttl = max(30, int(self.settings.telegram_confirmation_ttl_sec))
+        if created > 0 and (time.time() - created) > ttl:
+            self._pending_confirmations.pop(chat_id, None)
+            return "Pending confirmation expired. Please send task again."
+        if self._is_confirm_text(text):
+            return self._confirm_pending(chat_id)
+        if self._is_reject_text(text):
+            return self._reject_pending(chat_id)
+        return "You have a pending risky task. Reply yes/no (or /yes /no)."
+
+    def _confirm_pending(self, chat_id: str) -> str:
+        pending = self._pending_confirmations.pop(chat_id, None)
+        if not pending:
+            return "No pending task to confirm."
+        task = str(pending.get("task", "")).strip()
+        if not task:
+            return "No pending task to confirm."
+        return self._run_task(chat_id=chat_id, task=task)
+
+    def _reject_pending(self, chat_id: str) -> str:
+        pending = self._pending_confirmations.pop(chat_id, None)
+        if not pending:
+            return "No pending task to reject."
+        return "Canceled pending risky task."
+
+    def _is_confirm_text(self, text: str) -> bool:
+        normalized = (text or "").strip().lower()
+        return normalized in {"yes", "y", "ok", "confirm", "ยืนยัน", "ตกลง", "/yes", "/confirm"}
+
+    def _is_reject_text(self, text: str) -> bool:
+        normalized = (text or "").strip().lower()
+        return normalized in {"no", "n", "cancel", "reject", "ยกเลิก", "ไม่", "/no", "/reject"}
+
+    def _looks_risky_task(self, task: str) -> bool:
+        text = (task or "").lower()
+        risky_patterns = [
+            r"\brm\b",
+            r"\bdelete\b",
+            r"\bdrop\b",
+            r"\btruncate\b",
+            r"\bshutdown\b",
+            r"\bkill\b",
+            r"\bformat\b",
+            r"\bsend\s+email\b",
+            r"\bemail\b",
+            r"\bcurl\b",
+            r"\bwget\b",
+            r"\bchmod\b",
+            r"\bchown\b",
+            r"\bmv\b",
+            r"\bcp\b",
+            r"\bapt\b",
+            r"\bpip\s+install\b",
+            r"\bdocker\b",
+            r"ลบ",
+            r"ส่งเมล",
+            r"อีเมล",
+            r"ติดตั้ง",
+            r"ถอนการติดตั้ง",
+            r"ย้ายไฟล์",
+            r"คัดลอกไฟล์",
+        ]
+        return any(re.search(p, text) for p in risky_patterns)
 
     def _schedule_task(self, chat_id: str, text: str) -> str:
         raw = (text or "").strip()

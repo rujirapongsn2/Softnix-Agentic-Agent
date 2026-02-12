@@ -44,3 +44,12 @@ def test_parse_telegram_schedule_disable_command() -> None:
     assert cmd is not None
     assert cmd.name == "schedule_disable"
     assert cmd.arg == "abc123"
+
+
+def test_parse_telegram_yes_no_commands() -> None:
+    yes_cmd = parse_telegram_command("/yes")
+    no_cmd = parse_telegram_command("/no")
+    assert yes_cmd is not None
+    assert no_cmd is not None
+    assert yes_cmd.name == "yes"
+    assert no_cmd.name == "no"

@@ -11,6 +11,10 @@ class TelegramCommand:
 
 SUPPORTED_COMMANDS = {
     "run",
+    "yes",
+    "no",
+    "confirm",
+    "reject",
     "schedule",
     "schedules",
     "schedule_runs",

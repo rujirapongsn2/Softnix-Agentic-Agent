@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+FINAL_OUTPUT_MAX_CHARS = 4000
+
 
 def help_text() -> str:
     return (
+        "Natural mode: send plain text to run task directly (no /run needed)\n"
+        "Risky tasks require confirmation: reply yes/no or /yes /no\n\n"
         "Commands:\n"
         "/run <task>\n"
+        "/yes | /no\n"
         "/schedule <today/tomorrow/daily text>\n"
         "/schedules\n"
         "/schedule_runs <schedule_id>\n"
@@ -44,8 +49,8 @@ def pending_text(run_id: str, items: list[dict]) -> str:
 
 def final_run_text(run_id: str, status: str, iteration: int, max_iters: int, stop_reason: str, output: str) -> str:
     short = (output or "").strip()
-    if len(short) > 400:
-        short = short[:397] + "..."
+    if len(short) > FINAL_OUTPUT_MAX_CHARS:
+        short = short[: FINAL_OUTPUT_MAX_CHARS - 3] + "..."
     lines = [
         f"Run {run_id}: {status}",
         f"iteration: {iteration}/{max_iters}",

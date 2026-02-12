@@ -17,6 +17,7 @@ venv/
 tmp/
 deploy/local/
 skillpacks/**/.secrets/
+skillpacks/**/.secret/
 
 # test outputs
 *.log

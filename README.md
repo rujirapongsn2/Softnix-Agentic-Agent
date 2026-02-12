@@ -6,6 +6,7 @@ CLI-first agent framework ที่ทำงานตาม flow:
 
 รองรับ:
 - Skills มาตรฐาน `SKILL.md`
+- Skill-local secret ผ่านโฟลเดอร์ `.secret/` (ไม่ commit เข้า git)
 - LLM Providers: `OpenAI`, `Claude`, `OpenAI-compatible custom endpoint`
 - Safe action execution (allowlist)
 - Core Memory แบบ markdown-first (`memory/PROFILE.md`/`memory/SESSION.md` + pending/inferred flow)
@@ -22,6 +23,14 @@ CLI-first agent framework ที่ทำงานตาม flow:
 - `src/softnix_agentic_agent/skills/*` parser/loader สำหรับ `SKILL.md`
 - `src/softnix_agentic_agent/providers/*` adapter ของ provider
 - `src/softnix_agentic_agent/api/app.py` REST facade
+
+## Skill Secret Management
+
+- สำหรับ skill ที่ต้องใช้ API key ให้เก็บไฟล์ลับไว้ที่ `skillpacks/<skill-name>/.secret/`
+- ตัวอย่าง: `skillpacks/tavily-search/.secret/TAVILY_API_KEY`
+- ระบบจะ materialize ไฟล์ใน `.secret/` ไปยัง `.softnix_skill_exec/.../.secret/` ตอนรัน skill script โดยอัตโนมัติ
+- `.gitignore` ถูกตั้งค่าให้ไม่เก็บ `skillpacks/**/.secret/` ใน git
+- แนะนำให้ script รองรับทั้ง env var และไฟล์ `.secret` (env มาก่อน)
 
 ## Architecture Diagram
 
@@ -162,6 +171,9 @@ pip install -e '.[dev]'
 - `SOFTNIX_TELEGRAM_WEBHOOK_SECRET` secret token สำหรับ verify webhook header
 - `SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC` polling interval (ใช้กับ worker/poll mode)
 - `SOFTNIX_TELEGRAM_MAX_TASK_CHARS` จำกัดความยาว task ผ่าน `/run`
+- `SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED` เปิดโหมดใช้งานแบบธรรมชาติ (ข้อความปกติ = task)
+- `SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED` เปิดการขอยืนยันก่อนรันงานเสี่ยง
+- `SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC` อายุของคำขอยืนยันงานเสี่ยง (วินาที)
 - `SOFTNIX_SCHEDULER_ENABLED` เปิด/ปิด scheduler worker สำหรับงานตั้งเวลา
 - `SOFTNIX_SCHEDULER_DIR` path เก็บ schedule definitions/history
 - `SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC` ความถี่ที่ worker ตรวจงานที่ถึงเวลา
@@ -391,6 +403,9 @@ SOFTNIX_TELEGRAM_BOT_TOKEN=<YOUR_BOT_TOKEN>
 SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS=8388377631
 SOFTNIX_TELEGRAM_WEBHOOK_SECRET=<SET_REAL_SECRET>
 SOFTNIX_TELEGRAM_MAX_TASK_CHARS=2000
+SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED=true
+SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED=true
+SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC=300
 ```
 
 หมายเหตุ:
@@ -436,6 +451,7 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 
 ส่งข้อความใน Telegram:
 - `/help`
+- `วันนี้วันที่เท่าไหร่` (natural mode ไม่ต้องใช้ `/run`)
 - `/run สรุปเว็บไซต์ https://www.softnix.co.th/softnix-logger/`
 - `/schedule ทุกวัน 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI`
 - `/schedules`
@@ -446,10 +462,13 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - `/cancel <run_id>`
 - `/resume <run_id>`
 
-พฤติกรรมหลัง `/run`:
+พฤติกรรมหลังส่ง task:
 - bot จะตอบ `Started run: <run_id>` ทันที
 - เมื่อ run จบ bot จะส่ง final summary ของสถานะ (`completed|failed|canceled`)
 - ถ้ามี artifacts ระบบจะส่งไฟล์ล่าสุดกลับ Telegram อัตโนมัติ (สูงสุด 3 ไฟล์)
+- หากเป็นงานเสี่ยง (เช่น ลบไฟล์, ส่งอีเมล, ติดตั้ง package) bot จะขอ confirm ก่อนรัน
+  - ตอบ `yes` หรือ `/yes` เพื่อยืนยัน
+  - ตอบ `no` หรือ `/no` เพื่อยกเลิก
 
 พฤติกรรมหลัง `/schedule`:
 - bot จะสร้าง schedule ให้ทันที และตอบ `Schedule created: <schedule_id>`

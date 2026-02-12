@@ -210,6 +210,9 @@ def test_telegram_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_TELEGRAM_WEBHOOK_SECRET", raising=False)
     monkeypatch.delenv("SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC", raising=False)
     monkeypatch.delenv("SOFTNIX_TELEGRAM_MAX_TASK_CHARS", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC", raising=False)
 
     settings = load_settings()
     assert settings.telegram_enabled is True
@@ -219,6 +222,31 @@ def test_telegram_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.telegram_webhook_secret == "secret-x"
     assert settings.telegram_poll_interval_sec == 2.5
     assert settings.telegram_max_task_chars == 1600
+    assert settings.telegram_natural_mode_enabled is True
+    assert settings.telegram_risky_confirmation_enabled is True
+    assert settings.telegram_confirmation_ttl_sec == 300
+
+
+def test_telegram_natural_mode_and_confirmation_config_from_env(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".env").write_text(
+        "SOFTNIX_TELEGRAM_ENABLED=true\n"
+        "SOFTNIX_TELEGRAM_BOT_TOKEN=telegram-token\n"
+        "SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS=1001\n"
+        "SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED=false\n"
+        "SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED=false\n"
+        "SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC=120\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC", raising=False)
+
+    settings = load_settings()
+    assert settings.telegram_natural_mode_enabled is False
+    assert settings.telegram_risky_confirmation_enabled is False
+    assert settings.telegram_confirmation_ttl_sec == 120
 
 
 def test_scheduler_config_from_env(tmp_path: Path, monkeypatch) -> None:

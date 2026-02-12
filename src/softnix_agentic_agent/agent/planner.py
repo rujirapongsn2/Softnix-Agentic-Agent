@@ -91,6 +91,13 @@ class Planner:
             f"Skills:\n{skills_context}\n"
             "Return JSON plan now."
         )
+        if iteration >= max_iters:
+            user_prompt += (
+                "\nFinal-iteration guard:\n"
+                "- This is the last iteration; avoid new exploration.\n"
+                "- If there are no blocking errors, set done=true and provide final_output now.\n"
+                "- Prefer summarizing verified evidence already collected."
+            )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},

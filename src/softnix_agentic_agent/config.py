@@ -71,6 +71,9 @@ class Settings:
     telegram_webhook_secret: str | None = None
     telegram_poll_interval_sec: float = 1.0
     telegram_max_task_chars: int = 2000
+    telegram_natural_mode_enabled: bool = True
+    telegram_risky_confirmation_enabled: bool = True
+    telegram_confirmation_ttl_sec: int = 300
     scheduler_enabled: bool = False
     scheduler_dir: Path = Path(".softnix/schedules")
     scheduler_poll_interval_sec: float = 15.0
@@ -217,6 +220,13 @@ def load_settings() -> Settings:
         telegram_webhook_secret=os.getenv("SOFTNIX_TELEGRAM_WEBHOOK_SECRET"),
         telegram_poll_interval_sec=float(os.getenv("SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC", "1.0")),
         telegram_max_task_chars=int(os.getenv("SOFTNIX_TELEGRAM_MAX_TASK_CHARS", "2000")),
+        telegram_natural_mode_enabled=os.getenv("SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED", "true").lower()
+        in {"1", "true", "yes", "on"},
+        telegram_risky_confirmation_enabled=os.getenv(
+            "SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED", "true"
+        ).lower()
+        in {"1", "true", "yes", "on"},
+        telegram_confirmation_ttl_sec=int(os.getenv("SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC", "300")),
         scheduler_enabled=os.getenv("SOFTNIX_SCHEDULER_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
         scheduler_dir=Path(os.getenv("SOFTNIX_SCHEDULER_DIR", ".softnix/schedules")),
         scheduler_poll_interval_sec=float(os.getenv("SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC", "15")),

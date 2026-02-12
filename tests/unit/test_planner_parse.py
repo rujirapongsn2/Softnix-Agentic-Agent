@@ -57,3 +57,30 @@ def test_planner_build_plan_uses_compacted_previous_output() -> None:
     assert usage["total_tokens"] == 2
     assert "truncated previous output" in prompt
     assert len(prompt) < len(previous_output)
+
+
+def test_planner_build_plan_adds_final_iteration_guard() -> None:
+    class _FakeProvider:
+        def __init__(self) -> None:
+            self.last_messages = []
+
+        def generate(self, messages, model, max_tokens):  # type: ignore[no-untyped-def]
+            self.last_messages = messages
+            return SimpleNamespace(
+                content='{"thought":"ok","done":false,"actions":[]}',
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+    provider = _FakeProvider()
+    planner = Planner(provider=provider, model="m")
+    plan, usage, prompt = planner.build_plan(
+        task="สรุปข้อมูลเว็บไซต์",
+        iteration=10,
+        max_iters=10,
+        previous_output="ok",
+        skills_context="- none",
+        memory_context="- none",
+    )
+    assert plan["done"] is False
+    assert usage["total_tokens"] == 2
+    assert "Final-iteration guard:" in prompt
