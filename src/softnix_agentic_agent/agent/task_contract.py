@@ -105,6 +105,8 @@ class TaskContractParser:
             normalized = self._normalize_file_token(token)
             if not normalized:
                 continue
+            if self._looks_like_code_member_call(text=text, token=normalized):
+                continue
             if normalized in source_refs:
                 continue
             if normalized.endswith(".py") and self._looks_like_skill_script_input_ref(text, normalized):
@@ -253,12 +255,21 @@ class TaskContractParser:
             normalized = self._normalize_file_token(token)
             if not normalized:
                 continue
+            if self._looks_like_code_member_call(text=text, token=normalized):
+                continue
             if normalized.endswith(".py") and self._looks_like_skill_script_input_ref(text, normalized):
                 continue
             if not self._looks_like_workspace_output_candidate(normalized):
                 continue
             rows.append(normalized)
         return rows
+
+    def _looks_like_code_member_call(self, text: str, token: str) -> bool:
+        candidate = (token or "").strip()
+        if not candidate or "/" in candidate:
+            return False
+        escaped = re.escape(candidate)
+        return bool(re.search(rf"(?<![A-Za-z0-9_]){escaped}\s*\(", text))
 
     def _infer_required_python_modules(self, text: str) -> list[str]:
         rows: list[str] = []

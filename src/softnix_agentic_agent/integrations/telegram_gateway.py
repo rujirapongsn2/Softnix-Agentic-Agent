@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -21,6 +22,8 @@ from softnix_agentic_agent.integrations.telegram_templates import (
 from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
 from softnix_agentic_agent.memory.service import CoreMemoryService
 from softnix_agentic_agent.runtime import build_runner
+from softnix_agentic_agent.skills.factory import normalize_skill_name
+from softnix_agentic_agent.skills.loader import SkillLoader
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
 from softnix_agentic_agent.storage.schedule_store import ScheduleStore, compute_next_run_at
 
@@ -129,6 +132,8 @@ class TelegramGateway:
         if cmd.name == "schedule":
             return self._schedule_task(chat_id=chat_id, text=cmd.arg)
         if cmd.name == "schedules":
+            if str(cmd.arg or "").strip():
+                return self._schedule_task(chat_id=chat_id, text=cmd.arg)
             return self._list_schedules(chat_id=chat_id)
         if cmd.name == "schedule_runs":
             return self._list_schedule_runs(chat_id=chat_id, schedule_id=cmd.arg)
@@ -150,6 +155,10 @@ class TelegramGateway:
             return self._skill_status(cmd.arg)
         if cmd.name == "skill_builds":
             return self._skill_builds()
+        if cmd.name == "skill_delete":
+            return self._skill_delete(cmd.arg)
+        if cmd.name == "skills":
+            return self._skills()
         return help_text()
 
     def _submit_or_confirm_task(self, chat_id: str, task: str) -> str:
@@ -337,6 +346,58 @@ class TelegramGateway:
                 f"{item.get('skill_name','-')} stage={item.get('stage','-')}"
             )
         return "\n".join(lines)
+
+    def _skills(self) -> str:
+        loader = SkillLoader(Path(self.settings.skills_dir))
+        items = loader.list_skills()
+        if not items:
+            return "No skills found"
+        lines = [f"Skills ({len(items)}):"]
+        for skill in items[:50]:
+            name = str(getattr(skill, "name", "") or "-")
+            desc = str(getattr(skill, "description", "") or "").strip()
+            lines.append(f"- {name}" + (f": {desc}" if desc else ""))
+        return "\n".join(lines)
+
+    def _skill_delete(self, skill_name: str) -> str:
+        raw = (skill_name or "").strip()
+        if not raw:
+            return "Usage: /skill_delete <skill_name>"
+        try:
+            normalized = normalize_skill_name(raw)
+        except Exception as exc:
+            return f"Invalid skill name: {exc}"
+
+        root = Path(self.settings.skills_dir).resolve()
+        target = self._resolve_skill_delete_target(root=root, normalized=normalized)
+        if target is None:
+            return f"Skill not found: {normalized}"
+        if not (target / "SKILL.md").exists():
+            return f"Refuse delete: not a valid skill folder ({normalized})"
+
+        shutil.rmtree(target)
+        return f"Skill deleted: {normalized}"
+
+    def _resolve_skill_delete_target(self, root: Path, normalized: str) -> Path | None:
+        candidates = [
+            normalized,
+            normalized.replace("-", "_"),
+            normalized.replace("_", "-"),
+        ]
+        seen: set[str] = set()
+        for name in candidates:
+            item = str(name or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            target = (root / item).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError:
+                continue
+            if target.exists() and target.is_dir():
+                return target
+        return None
 
     def _monitor_skill_build_and_notify(self, job_id: str, chat_id: str, monitor_key: str) -> None:
         deadline = time.time() + 300.0

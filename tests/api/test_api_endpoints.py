@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from softnix_agentic_agent.config import Settings
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
+from softnix_agentic_agent.storage.retention_service import RetentionConfig, RunRetentionService
 from softnix_agentic_agent.types import RunState
 
 
@@ -236,6 +237,100 @@ def test_api_requires_key_when_configured(monkeypatch, tmp_path: Path) -> None:
         headers={"x-api-key": "secret-key", "x-memory-admin-key": "anything"},
     )
     assert reload_policy.status_code == 403
+
+
+def test_admin_retention_report_and_run(monkeypatch, tmp_path: Path) -> None:
+    from softnix_agentic_agent.api import app as app_module
+    from softnix_agentic_agent.types import RunStatus
+
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        memory_admin_key="admin-secret",
+        run_retention_enabled=True,
+        run_retention_keep_finished_days=0,
+        run_retention_max_runs=100,
+        run_retention_max_bytes=1_000_000,
+    )
+    store = FilesystemStore(settings.runs_dir)
+
+    old_done = RunState(
+        run_id="old-done",
+        task="t",
+        provider="openai",
+        model="m",
+        workspace=str(tmp_path),
+        skills_dir=str(tmp_path),
+        max_iters=5,
+    )
+    old_done.status = RunStatus.COMPLETED
+    old_done.updated_at = "2026-01-01T00:00:00+00:00"
+    store.init_run(old_done)
+    (store.run_dir("old-done") / "artifacts" / "done.txt").write_text("x", encoding="utf-8")
+
+    active = RunState(
+        run_id="active",
+        task="t",
+        provider="openai",
+        model="m",
+        workspace=str(tmp_path),
+        skills_dir=str(tmp_path),
+        max_iters=5,
+    )
+    active.updated_at = "2026-01-01T00:00:00+00:00"
+    store.init_run(active)
+    (store.run_dir("active") / "artifacts" / "active.txt").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(app_module, "_settings", settings)
+    monkeypatch.setattr(app_module, "_store", store)
+    monkeypatch.setattr(app_module, "_threads", {})
+    monkeypatch.setattr(app_module, "_telegram_gateway", None)
+    monkeypatch.setattr(app_module, "_memory_admin", None)
+    monkeypatch.setattr(app_module, "_run_retention", None)
+
+    retention = RunRetentionService(
+        runs_dir=settings.runs_dir,
+        config=RetentionConfig(
+            enabled=True,
+            interval_sec=60,
+            keep_finished_days=settings.run_retention_keep_finished_days,
+            max_runs=settings.run_retention_max_runs,
+            max_bytes=settings.run_retention_max_bytes,
+        ),
+    )
+    monkeypatch.setattr(app_module, "_run_retention", retention)
+
+    client = TestClient(app_module.app)
+
+    no_key = client.get("/admin/storage/retention/report")
+    assert no_key.status_code == 401
+
+    report = client.get(
+        "/admin/storage/retention/report",
+        headers={"x-memory-admin-key": "admin-secret"},
+    )
+    assert report.status_code == 200
+    planned_ids = report.json()["report"]["planned_deletion_ids"]
+    assert "old-done" in planned_ids
+    assert "active" not in planned_ids
+
+    dry_run = client.post(
+        "/admin/storage/retention/run?dry_run=true",
+        headers={"x-memory-admin-key": "admin-secret"},
+    )
+    assert dry_run.status_code == 200
+    assert "old-done" in dry_run.json()["report"]["planned_deletion_ids"]
+    assert (settings.runs_dir / "old-done").exists()
+
+    apply_run = client.post(
+        "/admin/storage/retention/run?dry_run=false",
+        headers={"x-memory-admin-key": "admin-secret"},
+    )
+    assert apply_run.status_code == 200
+    assert "old-done" in apply_run.json()["deleted_run_ids"]
+    assert not (settings.runs_dir / "old-done").exists()
+    assert (settings.runs_dir / "active").exists()
 
 
 def test_runs_are_sorted_by_latest_updated_at(monkeypatch, tmp_path: Path) -> None:

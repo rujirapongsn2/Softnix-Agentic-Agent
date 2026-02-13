@@ -980,6 +980,31 @@ def test_loop_infer_output_files_ignores_inline_code_identifiers(tmp_path: Path)
     assert "resend.dev" not in inferred
 
 
+def test_loop_skill_build_task_does_not_auto_complete_without_installed_skill(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "final_output": "created", "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    skills_root = tmp_path / "prod-skillpacks"
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=skills_root)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้าง skill get_saleorder ให้หน่อย",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=skills_root,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert state.status == RunStatus.FAILED
+    assert "missing output file" in state.last_output.lower()
+    assert str((skills_root / "get-saleorder" / "SKILL.md").resolve()) in state.last_output
+    events = store.read_events(state.run_id)
+    assert not any("objective auto-completed from inferred validations" in e for e in events)
+
+
 def test_loop_prepare_run_sanitizes_secret_and_writes_workspace_secret_file(tmp_path: Path) -> None:
     raw_key = "re_testsecret_1234567890abcdef"
     provider = FakeProvider(outputs=[{"done": True, "actions": [], "final_output": "ok"}])
@@ -1000,7 +1025,8 @@ def test_loop_prepare_run_sanitizes_secret_and_writes_workspace_secret_file(tmp_
         max_iters=1,
     )
 
-    assert state.stop_reason == StopReason.COMPLETED
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert state.status == RunStatus.FAILED
     assert raw_key not in state.task
     assert "<REDACTED:RESEND_API_KEY>" in state.task
     assert ".secret/RESEND_API_KEY" in state.task
@@ -1540,6 +1566,61 @@ def test_loop_stops_on_repeated_capability_failure(tmp_path: Path) -> None:
     assert "capability block" in state.last_output
     events = store.read_events(state.run_id)
     assert any("stopped: capability_block repeated=" in e for e in events)
+
+
+def test_objective_progress_controller_soft_mode_only_signals(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        objective_progress_controller_enabled=True,
+        objective_progress_controller_mode="soft",
+        objective_stagnation_replan_threshold=2,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    decision = runner._objective_progress_controller_decision(
+        objective_stagnation_streak=3,
+        objective_progress={
+            "required_total": 1,
+            "missing_paths": ["result.txt"],
+            "produced_required_count": 0,
+        },
+    )
+    assert decision["signal"] is True
+    assert decision["mode"] == "soft"
+    assert decision["should_stop"] is False
+
+
+def test_objective_progress_controller_enforce_mode_can_stop(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": False, "actions": []}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        objective_progress_controller_enabled=True,
+        objective_progress_controller_mode="enforce",
+        objective_stagnation_replan_threshold=2,
+        objective_progress_enforce_streak_threshold=3,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    decision = runner._objective_progress_controller_decision(
+        objective_stagnation_streak=3,
+        objective_progress={
+            "required_total": 2,
+            "missing_paths": ["result.txt", "output.txt"],
+            "produced_required_count": 0,
+        },
+    )
+    assert decision["signal"] is True
+    assert decision["mode"] == "enforce"
+    assert decision["should_stop"] is True
 
 
 def test_loop_retries_planner_parse_error_and_recovers(tmp_path: Path) -> None:
@@ -2431,6 +2512,94 @@ def test_loop_replans_when_plan_repeats_failed_action_sequence(tmp_path: Path) -
     assert state.stop_reason == StopReason.COMPLETED
     events = store.read_events(state.run_id)
     assert any("plan gate triggered iteration=1 reason=repeated_failed_sequence" in e for e in events)
+
+
+def test_loop_replans_when_plan_matches_low_effective_pattern(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {"done": False, "actions": [{"name": "run_python_code", "params": {"code": "print('same')"}}]},
+            {"done": True, "actions": [{"name": "write_workspace_file", "params": {"path": "result.txt", "content": "ok"}}]},
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        low_effective_strategy_threshold=-0.5,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    store.append_strategy_outcome(strategy_key="failure_class:objective_validation_failed", success=False, run_id="h1")
+    store.append_strategy_outcome(strategy_key="failure_class:objective_validation_failed", success=False, run_id="h2")
+    store.append_failure_experience(
+        {
+            "run_id": "old-fail-seq-2",
+            "status": "failed",
+            "task": "สร้างไฟล์ผลลัพธ์จาก python",
+            "task_tokens": ["สร้าง", "ไฟล์", "ผลลัพธ์", "python"],
+            "selected_skills": [],
+            "action_sequence": ["run_python_code"],
+            "failure_class": "objective_validation_failed",
+            "strategy_key": "failure_class:objective_validation_failed",
+            "recommended_strategy": "avoid pure run_python_code-only loop",
+        },
+        max_items=100,
+    )
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างไฟล์ผลลัพธ์จาก python แล้วบันทึกลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("plan gate triggered iteration=1 reason=low_effective_pattern" in e for e in events)
+
+
+def test_loop_fails_fast_on_repeated_failure_class_without_progress(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {"code": "raise RuntimeError('unauthorized: invalid api key')"},
+                    }
+                ],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        repeated_failure_class_threshold=2,
+        capability_failure_streak_threshold=8,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เรียก API ภายนอกแล้วบันทึกผลลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=6,
+    )
+
+    assert state.status == RunStatus.FAILED
+    assert state.stop_reason == StopReason.NO_PROGRESS
+    assert "repeated failure class without progress" in state.last_output
+    events = store.read_events(state.run_id)
+    assert any("stopped: repeated_failure_class class=auth_secret_invalid streak=2" in e for e in events)
 
 
 def test_loop_auto_escalation_appends_actionable_message_for_auth_failure(tmp_path: Path) -> None:

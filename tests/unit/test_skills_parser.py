@@ -276,3 +276,32 @@ Use for dynamic pages.
     selected = loader.select_skills(task="ใช้ skill ส่งอีเมลไปที่ rujirapong@gmail.com")
     names = [s.name for s in selected]
     assert names == ["resend-email"]
+
+
+def test_loader_select_skills_skill_build_task_returns_no_unrelated_skills(tmp_path: Path) -> None:
+    resend = tmp_path / "resend-email"
+    resend.mkdir(parents=True)
+    (resend / "SKILL.md").write_text(
+        """---
+name: resend-email
+description: send email by resend api
+---
+Use for sending email.
+""",
+        encoding="utf-8",
+    )
+    web_summary = tmp_path / "web-summary"
+    web_summary.mkdir(parents=True)
+    (web_summary / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website from url
+---
+Use for website summary.
+""",
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(tmp_path)
+    selected = loader.select_skills(task="สร้าง skill get_saleorder ให้หน่อย")
+    assert selected == []

@@ -183,6 +183,34 @@ def test_gateway_schedules_and_schedule_runs(tmp_path: Path) -> None:
     assert any("no runs yet" in text for _, text in fake_client.sent_messages)
 
 
+def test_gateway_schedules_with_text_creates_schedule(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        scheduler_dir=tmp_path / "schedules",
+        scheduler_default_timezone="Asia/Bangkok",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    gateway.handle_update(
+        {
+            "update_id": 1,
+            "message": {"chat": {"id": 8388377631}, "text": "/schedules ทุกวัน 23:00 เตือนให้ไปนอน"},
+        }
+    )
+
+    created_messages = [text for _, text in fake_client.sent_messages if "Schedule created:" in text]
+    assert created_messages
+    schedule_files = list((tmp_path / "schedules").glob("*.json"))
+    assert len(schedule_files) == 1
+
+
 def test_gateway_schedule_runs_reflects_runstate_status(tmp_path: Path) -> None:
     store = FilesystemStore(tmp_path / "runs")
     settings = Settings(
@@ -396,6 +424,151 @@ def test_gateway_skill_build_command_and_status(tmp_path: Path) -> None:
     assert any("Skill build started: job123" in text for _, text in fake_client.sent_messages)
     assert any("Skill build job123" in text for _, text in fake_client.sent_messages)
     assert any("Skill builds (" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_skills_lists_available_skills(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skillpacks"
+    web_summary = skills_root / "web-summary"
+    tavily = skills_root / "tavily-search"
+    web_summary.mkdir(parents=True, exist_ok=True)
+    tavily.mkdir(parents=True, exist_ok=True)
+    (web_summary / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website content
+---
+Use for web summary.
+""",
+        encoding="utf-8",
+    )
+    (tavily / "SKILL.md").write_text(
+        """---
+name: tavily-search
+description: search the web for latest data
+---
+Use for web search.
+""",
+        encoding="utf-8",
+    )
+
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=skills_root,
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok = gateway.handle_update(
+        {"update_id": 33, "message": {"chat": {"id": 8388377631}, "text": "/skills"}}
+    )
+
+    assert ok is True
+    text = fake_client.sent_messages[-1][1]
+    assert "Skills (2):" in text
+    assert "- web-summary:" in text
+    assert "- tavily-search:" in text
+
+
+def test_gateway_skill_delete_deletes_skill_folder(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skillpacks"
+    target = skills_root / "web-summary"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "SKILL.md").write_text(
+        """---
+name: web-summary
+description: summarize website content
+---
+""",
+        encoding="utf-8",
+    )
+    (target / "scripts").mkdir(parents=True, exist_ok=True)
+    (target / "scripts" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=skills_root,
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok = gateway.handle_update(
+        {"update_id": 34, "message": {"chat": {"id": 8388377631}, "text": "/skill_delete web-summary"}}
+    )
+
+    assert ok is True
+    assert target.exists() is False
+    assert "Skill deleted: web-summary" in fake_client.sent_messages[-1][1]
+
+
+def test_gateway_skill_delete_resolves_underscore_hyphen_alias(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skillpacks"
+    target = skills_root / "sample_skill"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "SKILL.md").write_text(
+        """---
+name: sample-skill
+description: sample
+---
+""",
+        encoding="utf-8",
+    )
+
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=skills_root,
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok = gateway.handle_update(
+        {"update_id": 340, "message": {"chat": {"id": 8388377631}, "text": "/skill_delete sample-skill"}}
+    )
+
+    assert ok is True
+    assert target.exists() is False
+    assert "Skill deleted: sample-skill" in fake_client.sent_messages[-1][1]
+
+
+def test_gateway_skill_delete_rejects_missing_or_invalid_target(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skillpacks"
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=skills_root,
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok_missing = gateway.handle_update(
+        {"update_id": 35, "message": {"chat": {"id": 8388377631}, "text": "/skill_delete unknown-skill"}}
+    )
+    ok_usage = gateway.handle_update(
+        {"update_id": 36, "message": {"chat": {"id": 8388377631}, "text": "/skill_delete"}}
+    )
+
+    assert ok_missing is True
+    assert ok_usage is True
+    assert "Skill not found: unknown-skill" in fake_client.sent_messages[-2][1]
+    assert "Usage: /skill_delete <skill_name>" in fake_client.sent_messages[-1][1]
 
 
 def test_gateway_skill_build_auto_notify_completion(tmp_path: Path) -> None:

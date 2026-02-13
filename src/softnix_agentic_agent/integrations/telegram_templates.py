@@ -22,6 +22,8 @@ def help_text() -> str:
         "/skill_build <task>\n"
         "/skill_status <job_id>\n"
         "/skill_builds\n"
+        "/skill_delete <skill_name>\n"
+        "/skills\n"
         "/help"
     )
 

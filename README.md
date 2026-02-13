@@ -52,6 +52,7 @@ flowchart LR
     API --> SCHAPI["Schedule API (/schedules/*)"]
     API --> TGIN["Telegram API (/telegram/*)"]
     API --> SCHWORKER["Scheduler Worker (background thread)"]
+    API --> RETWORKER["Run Retention Worker (background thread)"]
     API --> ADMIN["Memory Admin Control Plane"]
 
     RUNAPI --> LOOP["Agent Loop"]
@@ -96,6 +97,7 @@ flowchart LR
     RUNS --> ITERS["iterations.jsonl"]
     RUNS --> EVENTS["events.log"]
     RUNS --> ARTIFACTS["artifacts/"]
+    RETWORKER --> RUNS
 
     TGW -->|run status + artifacts| TG
     WEB -->|Upload file| FILEAPI
@@ -168,6 +170,26 @@ pip install -e '.[dev]'
 - `SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS` จำนวน experience records สูงสุดที่เก็บใน store
 - `SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K` จำนวนเคสสำเร็จที่ดึงมาเป็น context ต่อ iteration
 - `SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN` จำนวน records ย้อนหลังที่ใช้ค้นหาเคสคล้าย
+- `SOFTNIX_RUN_RETENTION_ENABLED` เปิด/ปิด worker cleanup ประวัติ run อัตโนมัติ
+- `SOFTNIX_RUN_RETENTION_INTERVAL_SEC` ความถี่ที่ worker ตรวจนโยบาย retention
+- `SOFTNIX_RUN_RETENTION_KEEP_FINISHED_DAYS` เก็บ run ที่จบแล้วไว้อย่างน้อยกี่วันก่อนเริ่มพิจารณาลบ
+- `SOFTNIX_RUN_RETENTION_MAX_RUNS` เพดานจำนวน run ทั้งหมดใน `.softnix/runs` (เกินแล้วจะลบ finished ที่เก่ากว่า)
+- `SOFTNIX_RUN_RETENTION_MAX_BYTES` เพดานขนาดรวม (bytes) ของ `.softnix/runs` (เกินแล้วจะลบ finished ที่เก่ากว่า)
+- `SOFTNIX_SKILL_BUILD_RETENTION_KEEP_FINISHED_DAYS` เก็บ skill build jobs ที่จบแล้วไว้อย่างน้อยกี่วัน
+- `SOFTNIX_SKILL_BUILD_RETENTION_MAX_JOBS` เพดานจำนวน skill build jobs ใน `.softnix/skill-builds`
+- `SOFTNIX_SKILL_BUILD_RETENTION_MAX_BYTES` เพดานขนาดรวมของ `.softnix/skill-builds`
+- `SOFTNIX_EXPERIENCE_SUCCESS_MAX_ITEMS` เพดานจำนวนบรรทัดของ `success_cases.jsonl`
+- `SOFTNIX_EXPERIENCE_FAILURE_MAX_ITEMS` เพดานจำนวนบรรทัดของ `failure_cases.jsonl`
+- `SOFTNIX_EXPERIENCE_STRATEGY_MAX_ITEMS` เพดานจำนวนบรรทัดของ `strategy_outcomes.jsonl`
+
+**Retention Settings Guide**
+- ขอบเขตที่ worker ดูแลมี 3 ส่วน: `.softnix/runs`, `.softnix/skill-builds`, `.softnix/experience/*.jsonl`
+- worker จะทำงานทุก `SOFTNIX_RUN_RETENTION_INTERVAL_SEC` วินาที เมื่อ `SOFTNIX_RUN_RETENTION_ENABLED=true`
+- สำหรับ `runs` และ `skill-builds` ระบบจะลบเฉพาะงานที่จบแล้ว (`completed/failed/canceled`) โดยเริ่มจากรายการเก่าที่สุด
+- เงื่อนไขลบมี 3 ชั้น: เกินอายุ (`*_KEEP_FINISHED_DAYS`) หรือเกินจำนวน (`*_MAX_RUNS`/`*_MAX_JOBS`) หรือเกินขนาด (`*_MAX_BYTES`)
+- สำหรับ `experience` ระบบไม่ลบทั้งไฟล์ แต่จะ trim ให้เหลือบรรทัดล่าสุดตาม `SOFTNIX_EXPERIENCE_*_MAX_ITEMS`
+- ค่า `MAX_BYTES` ใช้หน่วย bytes เช่น `2147483648` = `2GB`, `1073741824` = `1GB`
+- แนะนำทดสอบก่อนลบจริงด้วย `POST /admin/storage/retention/run?dry_run=true` และดูรายงานที่ `GET /admin/storage/retention/report`
 - `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `memory/PROFILE.md`)
 - `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `memory/SESSION.md`)
 - `SOFTNIX_MEMORY_POLICY_PATH` path ของ global policy memory (admin-managed only)
@@ -292,6 +314,8 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `POST /admin/memory/keys/rotate` เพิ่ม local admin key ใหม่
 - `POST /admin/memory/keys/revoke` revoke local admin key
 - `GET /admin/memory/audit` อ่าน admin audit log
+- `GET /admin/storage/retention/report` ดูรายงาน retention และรายการ run ที่เข้าข่ายลบ
+- `POST /admin/storage/retention/run?dry_run=true|false` สั่ง retention cleanup แบบ dry-run หรือ apply จริง
 - `POST /runs/{id}/cancel` ส่งคำขอหยุด run
 - `POST /runs/{id}/resume` สั่ง resume run
 - `GET /skills` อ่านรายการ skills
@@ -527,6 +551,8 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - `/skill_build ช่วยสร้าง skill ตรวจสอบสถานะคำสั่งซื้อ`
 - `/skill_status <job_id>`
 - `/skill_builds`
+- `/skill_delete <skill_name>` (ลบ skill ออกจาก skillpacks)
+- `/skills` (แสดงรายการ skills ที่ระบบโหลดใช้งานได้)
 - `/schedule ทุกวัน 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI`
 - `/schedules`
 - `/schedule_runs <schedule_id>`
@@ -787,6 +813,8 @@ bash scripts/benchmark_success_rate.sh
   - `POST /admin/memory/keys/rotate`
   - `POST /admin/memory/keys/revoke`
   - `GET /admin/memory/audit`
+  - `GET /admin/storage/retention/report`
+  - `POST /admin/storage/retention/run`
 - รองรับ admin key ได้ 3 แหล่ง: legacy key เดี่ยว (`SOFTNIX_MEMORY_ADMIN_KEY`), env key list (`SOFTNIX_MEMORY_ADMIN_KEYS`), และ local rotated keys ใน `SOFTNIX_MEMORY_ADMIN_KEYS_PATH`
 
 ### One-click test script

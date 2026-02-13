@@ -61,7 +61,10 @@ flowchart LR
 5. `/pending <run_id>`
 - อ่าน inferred pending memory จาก `GET /runs/{run_id}/memory/pending`
 
-6. `/help`
+6. `/skills`
+- แสดงรายการ skills ที่ระบบโหลดได้จาก `skills_dir`
+
+7. `/help`
 - แสดงรายการคำสั่งและตัวอย่างการใช้
 
 หมายเหตุ:
@@ -174,7 +177,7 @@ Manual tests:
 
 Phase 1 (MVP)
 - polling mode
-- commands: `/run`, `/status`, `/cancel`, `/resume`, `/pending`, `/help`
+- commands: `/run`, `/status`, `/cancel`, `/resume`, `/pending`, `/skills`, `/help`
 - allowlist + basic logging
 
 Phase 2 (Hardening)

@@ -17,6 +17,7 @@ from softnix_agentic_agent.agent.task_contract import PathDiscoveryPolicy, TaskC
 from softnix_agentic_agent.config import Settings
 from softnix_agentic_agent.memory.markdown_store import MarkdownMemoryStore
 from softnix_agentic_agent.memory.service import CoreMemoryService
+from softnix_agentic_agent.skills.factory import normalize_skill_name
 from softnix_agentic_agent.skills.loader import SkillLoader
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
 from softnix_agentic_agent.types import IterationRecord, RunState, RunStatus, StopReason, utc_now_iso
@@ -147,7 +148,9 @@ class AgentLoopRunner:
 
     def _run_loop(self, state: RunState) -> RunState:
         skill_loader = SkillLoader(Path(state.skills_dir))
-        selected_for_runtime = skill_loader.select_skills(task=state.task)
+        is_skill_build_task = self._is_skill_build_task(state.task)
+        task_intent = self._infer_task_intent_label(state.task)
+        selected_for_runtime = [] if is_skill_build_task else skill_loader.select_skills(task=state.task)
         task_contract = self._task_contract_parser.parse(
             task=state.task,
             enforce_web_intel_contract=self._task_requires_web_intel_contract(state.task),
@@ -197,9 +200,14 @@ class AgentLoopRunner:
         previous_iteration_signature = ""
         repeated_iteration_count = 0
         produced_files_in_run: set[str] = set()
+        skill_success_outputs = (
+            []
+            if is_skill_build_task
+            else self._infer_output_files_from_selected_skills(selected_for_runtime)
+        )
         required_outputs = self._merge_required_outputs(
             task_contract.required_outputs,
-            self._infer_output_files_from_selected_skills(selected_for_runtime),
+            skill_success_outputs,
         )
         required_absent = list(task_contract.required_absent)
         previous_iteration_had_failed_action = False
@@ -215,6 +223,8 @@ class AgentLoopRunner:
         successful_action_history: list[str] = []
         latest_failure_fingerprint = ""
         active_strategy_keys: set[str] = set()
+        repeated_failure_class = ""
+        repeated_failure_class_count = 0
 
         try:
             if state.iteration == 0:
@@ -275,14 +285,14 @@ class AgentLoopRunner:
 
                 current_iteration = state.iteration + 1
                 iteration_started_at = time.perf_counter()
-                selected_skills = skill_loader.select_skills(task=state.task)
+                selected_skills = [] if is_skill_build_task else skill_loader.select_skills(task=state.task)
                 if selected_skills:
                     selected_names = ",".join(skill.name for skill in selected_skills)
                 else:
                     selected_names = "(none)"
                 skills_seen_in_run.update(skill.name for skill in selected_skills)
                 self.store.log_event(state.run_id, f"skills selected iteration={current_iteration} names={selected_names}")
-                skills_context = skill_loader.render_compact_context(task=state.task)
+                skills_context = "No skills found." if is_skill_build_task else skill_loader.render_compact_context(task=state.task)
                 memory_context = memory.build_prompt_context(max_items=self.settings.memory_prompt_max_items)
                 experience_rows: list[dict[str, Any]] = []
                 if self.settings.experience_enabled:
@@ -291,6 +301,8 @@ class AgentLoopRunner:
                         selected_skills=[skill.name for skill in selected_skills],
                         top_k=max(1, int(self.settings.experience_retrieval_top_k)),
                         max_scan=max(20, int(self.settings.experience_retrieval_max_scan)),
+                        task_intent=task_intent,
+                        min_quality_score=0.55,
                     )
                     if experience_rows:
                         self.store.log_event(
@@ -305,6 +317,7 @@ class AgentLoopRunner:
                         selected_skills=[skill.name for skill in selected_skills],
                         top_k=min(2, max(1, int(self.settings.experience_retrieval_top_k))),
                         max_scan=max(20, int(self.settings.experience_retrieval_max_scan)),
+                        task_intent=task_intent,
                     )
                     if failure_rows:
                         self.store.log_event(
@@ -398,6 +411,40 @@ class AgentLoopRunner:
                         experience_context=experience_context,
                         memory_context=memory_context,
                         runtime_guidance=repair_guidance,
+                    )
+                    plan = replan
+                    prompt_text = replan_prompt
+                    token_usage = self._merge_token_usage(token_usage, replan_usage)
+                    planner_attempts += replan_attempts
+                if self._should_replan_for_low_effective_pattern(
+                    actions=plan.get("actions", []) if isinstance(plan, dict) else [],
+                    failure_rows=failure_rows,
+                    min_score=float(self.settings.low_effective_strategy_threshold),
+                ):
+                    self.store.log_event(
+                        state.run_id,
+                        f"plan gate triggered iteration={current_iteration} reason=low_effective_pattern",
+                    )
+                    poor_patterns = self._describe_low_effective_patterns(
+                        failure_rows=failure_rows,
+                        min_score=float(self.settings.low_effective_strategy_threshold),
+                    )
+                    adaptive_guidance = (
+                        f"{runtime_guidance}\n"
+                        "Adaptive retry gate: planned action chain matches historically low-effectiveness strategy.\n"
+                        f"{poor_patterns}\n"
+                        "Choose an alternative plan with different action order/tools."
+                    )
+                    replan, replan_usage, replan_prompt, replan_attempts = self._build_plan_with_retry(
+                        state=state,
+                        task=state.task,
+                        iteration=current_iteration,
+                        max_iters=state.max_iters,
+                        previous_output=state.last_output,
+                        skills_context=skills_context,
+                        experience_context=experience_context,
+                        memory_context=memory_context,
+                        runtime_guidance=adaptive_guidance,
                     )
                     plan = replan
                     prompt_text = replan_prompt
@@ -555,6 +602,15 @@ class AgentLoopRunner:
                         ]
                     )
                 has_failed_action = any(not bool(result.get("ok")) for result in action_results)
+                iteration_failure_class = ""
+                if has_failed_action or ("[validation] failed" in output.lower()):
+                    iteration_failure = self._classify_failure(
+                        stop_reason=StopReason.NO_PROGRESS,
+                        last_output=output,
+                        action_results=action_results,
+                        failure_fingerprint=self._build_capability_failure_fingerprint(action_results),
+                    )
+                    iteration_failure_class = str(iteration_failure.get("failure_class", "")).strip()
 
                 if done:
                     if has_failed_action:
@@ -654,11 +710,12 @@ class AgentLoopRunner:
                         selected_skills=sorted(skills_seen_in_run),
                         action_history=successful_action_history,
                         produced_files=produced_files_in_run,
+                        task_intent=task_intent,
                     )
                     self.store.write_state(state)
                     return state
 
-                if not has_failed_action:
+                if (not has_failed_action) and (not is_skill_build_task):
                     auto_complete_report = self._evaluate_auto_complete_validations(
                         task=state.task,
                         workspace=Path(state.workspace),
@@ -677,6 +734,7 @@ class AgentLoopRunner:
                             selected_skills=sorted(skills_seen_in_run),
                             action_history=successful_action_history,
                             produced_files=produced_files_in_run,
+                            task_intent=task_intent,
                         )
                         self.store.write_state(state)
                         self.store.log_event(
@@ -698,18 +756,57 @@ class AgentLoopRunner:
                     objective_stagnation_streak = 0
                 else:
                     objective_stagnation_streak += 1
-                    threshold = max(2, int(self.settings.objective_stagnation_replan_threshold))
-                    if objective_stagnation_streak >= threshold:
+                controller = self._objective_progress_controller_decision(
+                    objective_stagnation_streak=objective_stagnation_streak,
+                    objective_progress=objective_progress,
+                )
+                if controller.get("signal", False):
+                    self.store.log_event(
+                        state.run_id,
+                        "objective progress controller "
+                        f"mode={controller.get('mode', 'soft')} "
+                        f"streak={objective_stagnation_streak} "
+                        f"required={objective_progress.get('required_total', 0)} "
+                        f"existing={objective_progress.get('existing_count', 0)} "
+                        f"non_empty={objective_progress.get('non_empty_count', 0)} "
+                        f"produced_required={objective_progress.get('produced_required_count', 0)} "
+                        f"produced={objective_progress.get('produced_count', 0)}",
+                    )
+                if controller.get("should_stop", False):
+                    state.status = RunStatus.FAILED
+                    state.stop_reason = StopReason.NO_PROGRESS
+                    state.last_output = str(controller.get("stop_message", "")).strip() or (
+                        "stopped: objective progress controller enforced no_progress"
+                    )
+                    state.updated_at = utc_now_iso()
+                    self.store.write_state(state)
+                    self.store.log_event(state.run_id, "stopped: objective_progress_controller enforced")
+                    return state
+                if iteration_failure_class:
+                    if iteration_failure_class == repeated_failure_class:
+                        repeated_failure_class_count += 1
+                    else:
+                        repeated_failure_class = iteration_failure_class
+                        repeated_failure_class_count = 1
+                    repeat_threshold = max(2, int(self.settings.repeated_failure_class_threshold))
+                    if repeated_failure_class_count >= repeat_threshold and objective_stagnation_streak >= 1:
+                        state.status = RunStatus.FAILED
+                        state.stop_reason = StopReason.NO_PROGRESS
+                        state.last_output = (
+                            "stopped: repeated failure class without progress "
+                            f"(class={iteration_failure_class}, streak={repeated_failure_class_count})"
+                        )
+                        state.updated_at = utc_now_iso()
+                        self.store.write_state(state)
                         self.store.log_event(
                             state.run_id,
-                            "objective stagnation detected "
-                            f"streak={objective_stagnation_streak} "
-                            f"required={objective_progress.get('required_total', 0)} "
-                            f"existing={objective_progress.get('existing_count', 0)} "
-                            f"non_empty={objective_progress.get('non_empty_count', 0)} "
-                            f"produced_required={objective_progress.get('produced_required_count', 0)} "
-                            f"produced={objective_progress.get('produced_count', 0)}",
+                            "stopped: repeated_failure_class "
+                            f"class={iteration_failure_class} streak={repeated_failure_class_count}",
                         )
+                        return state
+                else:
+                    repeated_failure_class = ""
+                    repeated_failure_class_count = 0
 
                 failure_fingerprint = self._build_capability_failure_fingerprint(action_results)
                 latest_failure_fingerprint = failure_fingerprint
@@ -778,6 +875,7 @@ class AgentLoopRunner:
                     selected_skills=sorted(skills_seen_in_run),
                     action_history=successful_action_history,
                     produced_files=produced_files_in_run,
+                    task_intent=task_intent,
                 )
                 self.store.write_state(state)
                 self.store.log_event(
@@ -829,6 +927,7 @@ class AgentLoopRunner:
                     action_results=previous_action_results,
                     failure_fingerprint=latest_failure_fingerprint,
                     produced_files=produced_files_in_run,
+                    task_intent=task_intent,
                 )
                 failure_class = str((failure_row or {}).get("failure_class", "")).strip()
                 self._record_strategy_outcomes(
@@ -1106,6 +1205,98 @@ class AgentLoopRunner:
         if ("http://" in text) or ("https://" in text) or ("www." in text):
             return True
         return False
+
+    def _is_skill_build_task(self, task: str) -> bool:
+        text = (task or "").lower()
+        if not text:
+            return False
+        markers = (
+            "สร้าง skill",
+            "create skill",
+            "build skill",
+            "skill ชื่อ",
+            "skill name",
+        )
+        return any(marker in text for marker in markers)
+
+    def _infer_task_intent_label(self, task: str) -> str:
+        text = (task or "").lower().strip()
+        if not text:
+            return "general"
+        rule_pairs = (
+            ("skill_build", ("create skill", "build skill", "สร้าง skill", "skill name", "skill ชื่อ")),
+            ("web_research", ("summarize website", "สรุปเว็บไซต์", "ข่าว ai", "web", "website", "url")),
+            ("code_execution", ("python", "script", "code", "run", "execute", "แก้โค้ด", "รันโค้ด")),
+            ("file_ops", ("delete", "remove", "ลบ", "ย้ายไฟล์", "rename", "copy", "ไฟล์")),
+            ("memory_ops", ("จำ", "memory", "profile.md", "session.md", "core memory")),
+            ("scheduling", ("schedule", "/schedule", "cron", "ตั้งเวลา", "ทุกวัน", "every day")),
+            ("telegram_ops", ("telegram", "/run", "/status", "/skills", "/skill_delete")),
+        )
+        for label, markers in rule_pairs:
+            if any(marker in text for marker in markers):
+                return label
+        return "general"
+
+    def _collect_skill_creation_validation_checks(self, task: str) -> list[dict[str, str]]:
+        if not self._is_skill_build_task(task):
+            return []
+        skill_name = self._infer_target_skill_name(task)
+        if not skill_name:
+            return []
+        skill_dir = Path(self.settings.skills_dir).resolve() / skill_name
+        checks: list[dict[str, str]] = [
+            {"type": "file_exists", "path": str((skill_dir / "SKILL.md").resolve())},
+        ]
+        for key_name in self._extract_secret_key_names(task):
+            checks.append(
+                {
+                    "type": "file_exists",
+                    "path": str((skill_dir / ".secret" / key_name).resolve()),
+                }
+            )
+        return checks
+
+    def _infer_target_skill_name(self, task: str) -> str:
+        text = (task or "").strip()
+        if not text:
+            return ""
+        patterns = (
+            r"(?:create|build)\s+skill\s+([A-Za-z0-9_-]{2,64})",
+            r"สร้าง\s*skill\s*([A-Za-z0-9_-]{2,64})",
+            r"skill\s*ชื่อ\s*([A-Za-z0-9_-]{2,64})",
+            r"skill\s*name\s*([A-Za-z0-9_-]{2,64})",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            raw = str(match.group(1) or "").strip()
+            if not raw:
+                continue
+            try:
+                return normalize_skill_name(raw)
+            except Exception:
+                continue
+        return ""
+
+    def _extract_secret_key_names(self, task: str) -> list[str]:
+        names: list[str] = []
+        text = str(task or "")
+        for m in re.finditer(
+            r"\b([A-Z][A-Z0-9_]{2,64}(?:API_KEY|TOKEN|SECRET_KEY))\b",
+            text,
+        ):
+            names.append(str(m.group(1)).strip().upper())
+        for m in re.finditer(r"<REDACTED:([A-Z][A-Z0-9_]{2,64})>", text):
+            names.append(str(m.group(1)).strip().upper())
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for name in names:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            uniq.append(name)
+        return uniq
 
     def _build_iteration_signature(
         self,
@@ -1739,6 +1930,7 @@ class AgentLoopRunner:
         selected_skills: list[str],
         action_history: list[str],
         produced_files: set[str],
+        task_intent: str,
     ) -> None:
         if not self.settings.experience_enabled:
             return
@@ -1765,11 +1957,18 @@ class AgentLoopRunner:
             "run_id": state.run_id,
             "status": "completed",
             "task": state.task,
+            "task_intent": task_intent,
             "task_tokens": task_tokens,
             "selected_skills": [str(x).strip() for x in selected_skills if str(x).strip()],
             "action_sequence": unique_actions[:20],
             "produced_files": sorted(str(x) for x in produced_files)[:50],
             "summary": (state.last_output or "")[:500],
+            "quality_score": self._experience_quality_score(
+                task=state.task,
+                action_sequence=unique_actions,
+                produced_files=produced_files,
+                summary=state.last_output,
+            ),
         }
         self.store.append_success_experience(payload, max_items=self.settings.experience_store_max_items)
         self.store.log_event(
@@ -1786,6 +1985,7 @@ class AgentLoopRunner:
         action_results: list[dict[str, Any]],
         failure_fingerprint: str,
         produced_files: set[str],
+        task_intent: str,
     ) -> dict[str, Any]:
         classification = self._classify_failure(
             stop_reason=state.stop_reason,
@@ -1801,6 +2001,7 @@ class AgentLoopRunner:
             "run_id": state.run_id,
             "status": "failed",
             "task": state.task,
+            "task_intent": task_intent,
             "task_tokens": sorted(self._experience_task_tokens(state.task)),
             "selected_skills": [str(x).strip() for x in selected_skills if str(x).strip()],
             "action_sequence": self._action_name_sequence(actions),
@@ -2023,6 +2224,32 @@ class AgentLoopRunner:
                 return True
         return False
 
+    def _should_replan_for_low_effective_pattern(
+        self,
+        actions: list[dict[str, Any]],
+        failure_rows: list[dict[str, Any]],
+        min_score: float,
+    ) -> bool:
+        planned = self._action_name_sequence(actions)
+        if not planned:
+            return False
+        planned_sig = self._action_sequence_signature(planned)
+        if not planned_sig:
+            return False
+        threshold = float(min_score)
+        for row in failure_rows:
+            strategy_key = str(row.get("strategy_key", "")).strip()
+            if not strategy_key:
+                continue
+            score = float(self.store.get_strategy_effectiveness_score(strategy_key))
+            if score > threshold:
+                continue
+            failed = [str(x).strip() for x in row.get("action_sequence", []) if str(x).strip()]
+            failed_sig = self._action_sequence_signature(failed)
+            if failed_sig and failed_sig == planned_sig:
+                return True
+        return False
+
     def _action_sequence_signature(self, names: list[str], max_len: int = 4) -> str:
         rows = [str(x).strip().lower() for x in names if str(x).strip()]
         if not rows:
@@ -2044,6 +2271,30 @@ class AgentLoopRunner:
                 break
         if not lines:
             return "- avoid repeating identical failed action sequence"
+        return "\n".join(lines)
+
+    def _describe_low_effective_patterns(self, failure_rows: list[dict[str, Any]], min_score: float) -> str:
+        lines: list[str] = []
+        seen: set[str] = set()
+        threshold = float(min_score)
+        for row in failure_rows:
+            strategy_key = str(row.get("strategy_key", "")).strip()
+            if not strategy_key:
+                continue
+            score = float(self.store.get_strategy_effectiveness_score(strategy_key))
+            if score > threshold:
+                continue
+            sequence = [str(x).strip() for x in row.get("action_sequence", []) if str(x).strip()]
+            sig = self._action_sequence_signature(sequence)
+            if not sig or sig in seen:
+                continue
+            seen.add(sig)
+            failure_class = str(row.get("failure_class", "")).strip() or "unknown"
+            lines.append(f"- avoid low-effective [{sig}] class={failure_class} score={score:+.2f}")
+            if len(lines) >= 3:
+                break
+        if not lines:
+            return "- no low-effectiveness patterns"
         return "\n".join(lines)
 
     def _should_record_experience(
@@ -2086,6 +2337,35 @@ class AgentLoopRunner:
                 continue
             tokens.add(item)
         return tokens
+
+    def _experience_quality_score(
+        self,
+        task: str,
+        action_sequence: list[str],
+        produced_files: set[str],
+        summary: str | None,
+    ) -> float:
+        score = 0.0
+        if produced_files:
+            score += 0.45
+        unique_actions = {str(x).strip() for x in action_sequence if str(x).strip()}
+        if unique_actions:
+            score += min(0.3, len(unique_actions) * 0.08)
+            preparatory_only = {"list_dir", "read_file"}
+            if all(name in preparatory_only for name in unique_actions):
+                score -= 0.25
+        if self._is_answer_only_task(task):
+            score += 0.12
+        summary_text = str(summary or "").strip()
+        if summary_text:
+            score += min(0.18, len(summary_text) / 1200.0)
+            if "[validation] failed" in summary_text.lower():
+                score -= 0.2
+        if score < 0.0:
+            return 0.0
+        if score > 1.0:
+            return 1.0
+        return score
 
     def _merge_token_usage(self, current: dict[str, int], incoming: dict[str, int]) -> dict[str, int]:
         merged = dict(current)
@@ -2146,6 +2426,18 @@ class AgentLoopRunner:
                 "Execution objective: this task requires performing an operation "
                 "(not only reading/analyzing). Execute the target command/script and verify success."
             )
+        if self._is_skill_build_task(task):
+            skill_name = self._infer_target_skill_name(task)
+            if skill_name:
+                target_dir = (Path(self.settings.skills_dir).resolve() / skill_name).resolve()
+                guidance.append(
+                    "Skill build objective: install/commit generated skill to configured skills_dir "
+                    f"at {target_dir}"
+                )
+                guidance.append(f"Required artifact: {(target_dir / 'SKILL.md').resolve()}")
+                guidance.append(
+                    "Do not stop after writing only workspace temp files; final skill must exist in skills_dir."
+                )
 
         if self._is_preparatory_only_iteration(previous_actions=previous_actions, previous_action_results=previous_action_results):
             guidance.append(
@@ -2185,6 +2477,54 @@ class AgentLoopRunner:
         if not guidance:
             return "- none"
         return "\n".join(guidance)
+
+    def _objective_progress_controller_decision(
+        self,
+        objective_stagnation_streak: int,
+        objective_progress: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not bool(self.settings.objective_progress_controller_enabled):
+            return {"enabled": False, "mode": "off", "signal": False, "should_stop": False}
+
+        mode = str(self.settings.objective_progress_controller_mode or "soft").strip().lower()
+        if mode not in {"soft", "enforce"}:
+            mode = "soft"
+
+        threshold = max(2, int(self.settings.objective_stagnation_replan_threshold))
+        if objective_stagnation_streak < threshold:
+            return {"enabled": True, "mode": mode, "signal": False, "should_stop": False}
+
+        required_total = int(objective_progress.get("required_total", 0))
+        missing_paths = objective_progress.get("missing_paths", [])
+        missing_count = len(missing_paths) if isinstance(missing_paths, list) else 0
+        produced_required = int(objective_progress.get("produced_required_count", 0))
+        should_stop = False
+        stop_message = ""
+
+        if mode == "enforce":
+            enforce_threshold = max(
+                threshold + 1,
+                int(self.settings.objective_progress_enforce_streak_threshold),
+            )
+            if (
+                objective_stagnation_streak >= enforce_threshold
+                and required_total > 0
+                and missing_count > 0
+                and produced_required <= 0
+            ):
+                should_stop = True
+                stop_message = (
+                    "stopped: objective progress controller "
+                    f"(mode=enforce, streak={objective_stagnation_streak}, missing_outputs={missing_count})"
+                )
+
+        return {
+            "enabled": True,
+            "mode": mode,
+            "signal": True,
+            "should_stop": should_stop,
+            "stop_message": stop_message,
+        }
 
     def _estimate_action_confidence(self, action: dict[str, Any], result: dict[str, Any]) -> tuple[float, str]:
         ok = bool(result.get("ok", False))
@@ -2608,6 +2948,8 @@ class AgentLoopRunner:
 
         for path in (required_absent or []):
             checks.append({"type": "file_absent", "path": path})
+
+        checks.extend(self._collect_skill_creation_validation_checks(task))
 
         lowered_task = (task or "").lower()
         if "pytest" in lowered_task:

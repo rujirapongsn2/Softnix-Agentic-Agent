@@ -196,6 +196,8 @@ class FilesystemStore:
         selected_skills: list[str],
         top_k: int = 3,
         max_scan: int = 300,
+        task_intent: str = "",
+        min_quality_score: float = 0.55,
     ) -> list[dict[str, Any]]:
         if top_k <= 0:
             return []
@@ -210,13 +212,19 @@ class FilesystemStore:
                 continue
             if not _experience_quality_ok(row):
                 continue
+            row_quality = _experience_quality_score(row)
+            if row_quality < float(min_quality_score):
+                continue
+            if not _experience_intent_compatible(row=row, task_intent=task_intent):
+                continue
             past_tokens = {str(x).strip().lower() for x in row.get("task_tokens", []) if str(x).strip()}
             token_overlap = len(task_tokens.intersection(past_tokens))
             if token_overlap <= 0:
                 continue
             past_skills = {str(x).strip().lower() for x in row.get("selected_skills", []) if str(x).strip()}
             skill_overlap = len(current_skills.intersection(past_skills)) if current_skills else 0
-            score = token_overlap + (skill_overlap * 3)
+            intent_bonus = _experience_intent_bonus(row=row, task_intent=task_intent)
+            score = token_overlap + (skill_overlap * 3) + intent_bonus + row_quality
             scored.append((score, row))
         scored.sort(key=lambda item: (item[0], str(item[1].get("ts", ""))), reverse=True)
         return [row for _, row in scored[: int(top_k)]]
@@ -257,6 +265,7 @@ class FilesystemStore:
         selected_skills: list[str],
         top_k: int = 2,
         max_scan: int = 300,
+        task_intent: str = "",
     ) -> list[dict[str, Any]]:
         if top_k <= 0:
             return []
@@ -269,6 +278,8 @@ class FilesystemStore:
         for row in rows:
             if str(row.get("status", "")).lower() not in {"failed", "error"}:
                 continue
+            if not _experience_intent_compatible(row=row, task_intent=task_intent):
+                continue
             past_tokens = {str(x).strip().lower() for x in row.get("task_tokens", []) if str(x).strip()}
             token_overlap = len(task_tokens.intersection(past_tokens))
             if token_overlap <= 0:
@@ -278,7 +289,8 @@ class FilesystemStore:
             has_strategy = 1 if str(row.get("recommended_strategy", "")).strip() else 0
             strategy_key = str(row.get("strategy_key", "")).strip()
             strategy_score = self.get_strategy_effectiveness_score(strategy_key) if strategy_key else 0.0
-            score = token_overlap + (skill_overlap * 2) + (has_strategy * 2) + strategy_score
+            intent_bonus = _experience_intent_bonus(row=row, task_intent=task_intent)
+            score = token_overlap + (skill_overlap * 2) + (has_strategy * 2) + strategy_score + intent_bonus
             scored.append((score, row))
         scored.sort(key=lambda item: (item[0], str(item[1].get("ts", ""))), reverse=True)
         return [row for _, row in scored[: int(top_k)]]
@@ -383,3 +395,37 @@ def _experience_quality_ok(row: dict[str, Any]) -> bool:
     if all(action in preparatory_only for action in action_sequence):
         return False
     return True
+
+
+def _experience_quality_score(row: dict[str, Any]) -> float:
+    raw = row.get("quality_score")
+    try:
+        value = float(raw)
+        if value < 0:
+            return 0.0
+        if value > 1:
+            return 1.0
+        return value
+    except Exception:
+        # Backward compatibility for legacy rows without quality_score.
+        return 0.6
+
+
+def _experience_intent_compatible(row: dict[str, Any], task_intent: str) -> bool:
+    intent = str(task_intent or "").strip().lower()
+    if not intent:
+        return True
+    row_intent = str(row.get("task_intent", "")).strip().lower()
+    if not row_intent:
+        return True
+    return row_intent == intent
+
+
+def _experience_intent_bonus(row: dict[str, Any], task_intent: str) -> float:
+    intent = str(task_intent or "").strip().lower()
+    if not intent:
+        return 0.0
+    row_intent = str(row.get("task_intent", "")).strip().lower()
+    if not row_intent:
+        return 0.0
+    return 4.0 if row_intent == intent else -4.0

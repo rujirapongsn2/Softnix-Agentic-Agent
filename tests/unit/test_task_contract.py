@@ -47,6 +47,15 @@ def test_task_contract_parser_infers_python_modules_and_expected_text_markers() 
     assert "ok" in contract.expected_text_markers
 
 
+def test_task_contract_parser_ignores_method_call_like_file_tokens() -> None:
+    parser = TaskContractParser()
+    contract = parser.parse(
+        "สร้าง skill get_saleorder จากโค้ดตัวอย่างที่มี resp.json() และ print(resp.text) แล้วติดตั้งให้ใช้งานได้"
+    )
+
+    assert "resp.json" not in contract.required_outputs
+
+
 def test_path_discovery_policy_prefers_hinted_directories(tmp_path: Path) -> None:
     (tmp_path / "inputs").mkdir(parents=True, exist_ok=True)
     (tmp_path / "docs").mkdir(parents=True, exist_ok=True)

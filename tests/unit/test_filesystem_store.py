@@ -261,6 +261,104 @@ def test_store_strategy_effectiveness_score(tmp_path: Path) -> None:
     score = store.get_strategy_effectiveness_score(key)
     assert score > 0
 
+
+def test_retrieve_success_experiences_filters_by_intent_and_quality(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    store.append_success_experience(
+        {
+            "run_id": "high_quality_web",
+            "status": "completed",
+            "task": "สรุปข่าว AI วันนี้",
+            "task_intent": "web_research",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search"],
+            "action_sequence": ["run_python_code", "write_workspace_file"],
+            "produced_files": ["ai_news.txt"],
+            "quality_score": 0.9,
+            "summary": "done",
+        }
+    )
+    store.append_success_experience(
+        {
+            "run_id": "low_quality_web",
+            "status": "completed",
+            "task": "สรุปข่าว AI วันนี้",
+            "task_intent": "web_research",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search"],
+            "action_sequence": ["read_file"],
+            "produced_files": [],
+            "quality_score": 0.2,
+            "summary": "weak",
+        }
+    )
+    store.append_success_experience(
+        {
+            "run_id": "high_quality_other_intent",
+            "status": "completed",
+            "task": "สรุปข่าว AI วันนี้",
+            "task_intent": "code_execution",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search"],
+            "action_sequence": ["run_python_code", "write_workspace_file"],
+            "produced_files": ["ai_news.txt"],
+            "quality_score": 0.95,
+            "summary": "done",
+        }
+    )
+
+    matched = store.retrieve_success_experiences(
+        task="ช่วยสรุปข่าว AI วันนี้",
+        selected_skills=["tavily-search"],
+        top_k=5,
+        max_scan=50,
+        task_intent="web_research",
+        min_quality_score=0.55,
+    )
+    ids = [str(row.get("run_id")) for row in matched]
+    assert "high_quality_web" in ids
+    assert "low_quality_web" not in ids
+    assert "high_quality_other_intent" not in ids
+
+
+def test_retrieve_failure_experiences_prefers_matching_intent(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    store.append_failure_experience(
+        {
+            "run_id": "f-web",
+            "status": "failed",
+            "task": "สรุปข่าว AI วันนี้",
+            "task_intent": "web_research",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search"],
+            "failure_class": "missing_path",
+            "recommended_strategy": "discover path first",
+        }
+    )
+    store.append_failure_experience(
+        {
+            "run_id": "f-code",
+            "status": "failed",
+            "task": "สรุปข่าว AI วันนี้",
+            "task_intent": "code_execution",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search"],
+            "failure_class": "missing_module",
+            "recommended_strategy": "install module",
+        }
+    )
+
+    matched = store.retrieve_failure_experiences(
+        task="สรุปข่าว AI วันนี้",
+        selected_skills=["tavily-search"],
+        top_k=5,
+        max_scan=50,
+        task_intent="web_research",
+    )
+    ids = [str(row.get("run_id")) for row in matched]
+    assert "f-web" in ids
+    assert "f-code" not in ids
+
     bad_key = "failure_class:bad_strategy"
     store.append_strategy_outcome(strategy_key=bad_key, success=False, run_id="r4")
     store.append_strategy_outcome(strategy_key=bad_key, success=False, run_id="r5")

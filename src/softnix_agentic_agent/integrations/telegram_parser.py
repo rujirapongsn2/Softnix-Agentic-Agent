@@ -27,6 +27,8 @@ SUPPORTED_COMMANDS = {
     "skill_build",
     "skill_status",
     "skill_builds",
+    "skill_delete",
+    "skills",
     "help",
 }
 

@@ -65,3 +65,17 @@ def test_parse_telegram_skill_build_commands() -> None:
     assert build_cmd.name == "skill_build"
     assert status_cmd.name == "skill_status"
     assert builds_cmd.name == "skill_builds"
+
+
+def test_parse_telegram_skills_command() -> None:
+    cmd = parse_telegram_command("/skills")
+    assert cmd is not None
+    assert cmd.name == "skills"
+    assert cmd.arg == ""
+
+
+def test_parse_telegram_skill_delete_command() -> None:
+    cmd = parse_telegram_command("/skill_delete web-summary")
+    assert cmd is not None
+    assert cmd.name == "skill_delete"
+    assert cmd.arg == "web-summary"

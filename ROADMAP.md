@@ -4,6 +4,18 @@
 
 ## P0 (ต้องทำก่อน)
 
+0. Run history retention governance (Phase 1)
+- เป้าหมาย: คุมขนาดข้อมูลใน `.softnix/runs` ไม่ให้โตเกินจำเป็น
+- สถานะปัจจุบัน (เสร็จแล้ว):
+  - เพิ่ม retention policy จาก env (`keep_finished_days`, `max_runs`, `max_bytes`, `interval_sec`)
+  - เพิ่ม background retention worker (ลบเฉพาะ run ที่จบแล้ว)
+  - เพิ่ม admin APIs สำหรับ report/run cleanup แบบ dry-run และ apply จริง
+- สถานะอัปเดต (Phase 2 เสร็จแล้ว):
+  - เพิ่ม retention policy สำหรับ `.softnix/experience` และ `.softnix/skill-builds`
+  - worker เดียวกัน cleanup แบบอัตโนมัติครอบคลุมทั้ง 3 ส่วน (`runs`, `skill-builds`, `experience`)
+- งานถัดไป (Phase 3):
+  - เพิ่ม metrics/alert เมื่อ cleanup error หรือใกล้ชนเพดานบ่อย
+
 1. Core Memory hardening (Phase 3B)
 - เป้าหมาย: ปิดงาน hardening ฝั่ง admin control plane ให้พร้อม production
 - งานหลัก:

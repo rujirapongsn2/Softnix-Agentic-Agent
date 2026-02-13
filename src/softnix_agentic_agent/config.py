@@ -52,6 +52,11 @@ class Settings:
     planner_parse_error_streak_threshold: int = 3
     capability_failure_streak_threshold: int = 4
     objective_stagnation_replan_threshold: int = 3
+    objective_progress_controller_enabled: bool = True
+    objective_progress_controller_mode: str = "soft"
+    objective_progress_enforce_streak_threshold: int = 6
+    repeated_failure_class_threshold: int = 3
+    low_effective_strategy_threshold: float = -0.5
     planner_retry_on_parse_error: bool = True
     planner_retry_max_attempts: int = 2
     web_fetch_tls_verify: bool = True
@@ -84,6 +89,17 @@ class Settings:
     experience_store_max_items: int = 1000
     experience_retrieval_top_k: int = 3
     experience_retrieval_max_scan: int = 300
+    run_retention_enabled: bool = False
+    run_retention_interval_sec: float = 300.0
+    run_retention_keep_finished_days: int = 14
+    run_retention_max_runs: int = 500
+    run_retention_max_bytes: int = 2 * 1024 * 1024 * 1024
+    skill_build_retention_keep_finished_days: int = 14
+    skill_build_retention_max_jobs: int = 300
+    skill_build_retention_max_bytes: int = 1 * 1024 * 1024 * 1024
+    experience_success_max_items: int = 1000
+    experience_failure_max_items: int = 1000
+    experience_strategy_max_items: int = 4000
 
     def __post_init__(self) -> None:
         if self.safe_commands is None:
@@ -200,6 +216,20 @@ def load_settings() -> Settings:
         objective_stagnation_replan_threshold=int(
             os.getenv("SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD", "3")
         ),
+        objective_progress_controller_enabled=os.getenv(
+            "SOFTNIX_OBJECTIVE_PROGRESS_CONTROLLER_ENABLED", "true"
+        ).lower()
+        in {"1", "true", "yes", "on"},
+        objective_progress_controller_mode=os.getenv("SOFTNIX_OBJECTIVE_PROGRESS_CONTROLLER_MODE", "soft"),
+        objective_progress_enforce_streak_threshold=int(
+            os.getenv("SOFTNIX_OBJECTIVE_PROGRESS_ENFORCE_STREAK_THRESHOLD", "6")
+        ),
+        repeated_failure_class_threshold=int(
+            os.getenv("SOFTNIX_REPEATED_FAILURE_CLASS_THRESHOLD", "3")
+        ),
+        low_effective_strategy_threshold=float(
+            os.getenv("SOFTNIX_LOW_EFFECTIVE_STRATEGY_THRESHOLD", "-0.5")
+        ),
         planner_retry_on_parse_error=os.getenv("SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR", "true").lower()
         in {"1", "true", "yes", "on"},
         planner_retry_max_attempts=int(os.getenv("SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS", "2")),
@@ -242,6 +272,22 @@ def load_settings() -> Settings:
         experience_store_max_items=int(os.getenv("SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS", "1000")),
         experience_retrieval_top_k=int(os.getenv("SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K", "3")),
         experience_retrieval_max_scan=int(os.getenv("SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN", "300")),
+        run_retention_enabled=os.getenv("SOFTNIX_RUN_RETENTION_ENABLED", "false").lower()
+        in {"1", "true", "yes", "on"},
+        run_retention_interval_sec=float(os.getenv("SOFTNIX_RUN_RETENTION_INTERVAL_SEC", "300")),
+        run_retention_keep_finished_days=int(os.getenv("SOFTNIX_RUN_RETENTION_KEEP_FINISHED_DAYS", "14")),
+        run_retention_max_runs=int(os.getenv("SOFTNIX_RUN_RETENTION_MAX_RUNS", "500")),
+        run_retention_max_bytes=int(os.getenv("SOFTNIX_RUN_RETENTION_MAX_BYTES", str(2 * 1024 * 1024 * 1024))),
+        skill_build_retention_keep_finished_days=int(
+            os.getenv("SOFTNIX_SKILL_BUILD_RETENTION_KEEP_FINISHED_DAYS", "14")
+        ),
+        skill_build_retention_max_jobs=int(os.getenv("SOFTNIX_SKILL_BUILD_RETENTION_MAX_JOBS", "300")),
+        skill_build_retention_max_bytes=int(
+            os.getenv("SOFTNIX_SKILL_BUILD_RETENTION_MAX_BYTES", str(1 * 1024 * 1024 * 1024))
+        ),
+        experience_success_max_items=int(os.getenv("SOFTNIX_EXPERIENCE_SUCCESS_MAX_ITEMS", "1000")),
+        experience_failure_max_items=int(os.getenv("SOFTNIX_EXPERIENCE_FAILURE_MAX_ITEMS", "1000")),
+        experience_strategy_max_items=int(os.getenv("SOFTNIX_EXPERIENCE_STRATEGY_MAX_ITEMS", "4000")),
     )
 
 

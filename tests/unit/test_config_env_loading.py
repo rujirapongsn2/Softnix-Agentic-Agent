@@ -87,13 +87,27 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD=5\n"
         "SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD=6\n"
         "SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD=7\n"
+        "SOFTNIX_OBJECTIVE_PROGRESS_CONTROLLER_ENABLED=true\n"
+        "SOFTNIX_OBJECTIVE_PROGRESS_CONTROLLER_MODE=soft\n"
+        "SOFTNIX_OBJECTIVE_PROGRESS_ENFORCE_STREAK_THRESHOLD=9\n"
         "SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR=false\n"
         "SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS=4\n"
         "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n"
         "SOFTNIX_EXPERIENCE_ENABLED=true\n"
         "SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS=1500\n"
         "SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K=4\n"
-        "SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN=500\n",
+        "SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN=500\n"
+        "SOFTNIX_RUN_RETENTION_ENABLED=true\n"
+        "SOFTNIX_RUN_RETENTION_INTERVAL_SEC=120\n"
+        "SOFTNIX_RUN_RETENTION_KEEP_FINISHED_DAYS=21\n"
+        "SOFTNIX_RUN_RETENTION_MAX_RUNS=700\n"
+        "SOFTNIX_RUN_RETENTION_MAX_BYTES=987654321\n"
+        "SOFTNIX_SKILL_BUILD_RETENTION_KEEP_FINISHED_DAYS=22\n"
+        "SOFTNIX_SKILL_BUILD_RETENTION_MAX_JOBS=333\n"
+        "SOFTNIX_SKILL_BUILD_RETENTION_MAX_BYTES=777777777\n"
+        "SOFTNIX_EXPERIENCE_SUCCESS_MAX_ITEMS=1111\n"
+        "SOFTNIX_EXPERIENCE_FAILURE_MAX_ITEMS=1222\n"
+        "SOFTNIX_EXPERIENCE_STRATEGY_MAX_ITEMS=4333\n",
         encoding="utf-8",
     )
 
@@ -125,6 +139,9 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_PLANNER_PARSE_ERROR_STREAK_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_CAPABILITY_FAILURE_STREAK_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD", raising=False)
+    monkeypatch.delenv("SOFTNIX_OBJECTIVE_PROGRESS_CONTROLLER_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_OBJECTIVE_PROGRESS_CONTROLLER_MODE", raising=False)
+    monkeypatch.delenv("SOFTNIX_OBJECTIVE_PROGRESS_ENFORCE_STREAK_THRESHOLD", raising=False)
     monkeypatch.delenv("SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR", raising=False)
     monkeypatch.delenv("SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS", raising=False)
     monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
@@ -132,6 +149,17 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS", raising=False)
     monkeypatch.delenv("SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K", raising=False)
     monkeypatch.delenv("SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN", raising=False)
+    monkeypatch.delenv("SOFTNIX_RUN_RETENTION_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_RUN_RETENTION_INTERVAL_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_RUN_RETENTION_KEEP_FINISHED_DAYS", raising=False)
+    monkeypatch.delenv("SOFTNIX_RUN_RETENTION_MAX_RUNS", raising=False)
+    monkeypatch.delenv("SOFTNIX_RUN_RETENTION_MAX_BYTES", raising=False)
+    monkeypatch.delenv("SOFTNIX_SKILL_BUILD_RETENTION_KEEP_FINISHED_DAYS", raising=False)
+    monkeypatch.delenv("SOFTNIX_SKILL_BUILD_RETENTION_MAX_JOBS", raising=False)
+    monkeypatch.delenv("SOFTNIX_SKILL_BUILD_RETENTION_MAX_BYTES", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXPERIENCE_SUCCESS_MAX_ITEMS", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXPERIENCE_FAILURE_MAX_ITEMS", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXPERIENCE_STRATEGY_MAX_ITEMS", raising=False)
 
     settings = load_settings()
     assert settings.exec_timeout_sec == 45
@@ -161,6 +189,9 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.planner_parse_error_streak_threshold == 5
     assert settings.capability_failure_streak_threshold == 6
     assert settings.objective_stagnation_replan_threshold == 7
+    assert settings.objective_progress_controller_enabled is True
+    assert settings.objective_progress_controller_mode == "soft"
+    assert settings.objective_progress_enforce_streak_threshold == 9
     assert settings.planner_retry_on_parse_error is False
     assert settings.planner_retry_max_attempts == 4
     assert settings.web_fetch_tls_verify is False
@@ -168,6 +199,17 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.experience_store_max_items == 1500
     assert settings.experience_retrieval_top_k == 4
     assert settings.experience_retrieval_max_scan == 500
+    assert settings.run_retention_enabled is True
+    assert settings.run_retention_interval_sec == 120
+    assert settings.run_retention_keep_finished_days == 21
+    assert settings.run_retention_max_runs == 700
+    assert settings.run_retention_max_bytes == 987654321
+    assert settings.skill_build_retention_keep_finished_days == 22
+    assert settings.skill_build_retention_max_jobs == 333
+    assert settings.skill_build_retention_max_bytes == 777777777
+    assert settings.experience_success_max_items == 1111
+    assert settings.experience_failure_max_items == 1222
+    assert settings.experience_strategy_max_items == 4333
 
 
 def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:

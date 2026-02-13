@@ -92,6 +92,12 @@ class SkillLoader:
 
         task_tokens = self._extract_task_tokens(task_text)
         explicit_mentions = self._extract_explicit_skill_mentions(task_text=task_text)
+        if self._task_has_skill_build_intent(task_text):
+            if not explicit_mentions:
+                return []
+            explicit_only = [s for s in skills if s.name.lower() in explicit_mentions]
+            explicit_only.sort(key=lambda s: s.name.lower())
+            return explicit_only
         task_has_url = (
             "http://" in task_text
             or "https://" in task_text
@@ -175,6 +181,16 @@ class SkillLoader:
 
     def _task_has_email_intent(self, task_text: str) -> bool:
         markers = ("email", "e-mail", "mail", "อีเมล", "ส่งเมล", "ส่งอีเมล์")
+        return any(marker in task_text for marker in markers)
+
+    def _task_has_skill_build_intent(self, task_text: str) -> bool:
+        markers = (
+            "สร้าง skill",
+            "create skill",
+            "build skill",
+            "skill ชื่อ",
+            "skill name",
+        )
         return any(marker in task_text for marker in markers)
 
     def _is_email_related(self, blob: str) -> bool:

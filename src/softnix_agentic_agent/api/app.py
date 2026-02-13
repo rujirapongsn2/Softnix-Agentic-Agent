@@ -26,6 +26,7 @@ from softnix_agentic_agent.providers.factory import create_provider
 from softnix_agentic_agent.runtime import build_runner
 from softnix_agentic_agent.skills.loader import SkillLoader
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
+from softnix_agentic_agent.storage.retention_service import RetentionConfig, RunRetentionService
 from softnix_agentic_agent.storage.schedule_store import ScheduleStore, compute_next_run_at
 from softnix_agentic_agent.storage.skill_build_store import SkillBuildStore
 
@@ -121,6 +122,9 @@ _memory_admin: MemoryAdminControlPlane | None = None
 _skill_build_service: SkillBuildService | None = None
 _scheduler_thread: threading.Thread | None = None
 _scheduler_stop = threading.Event()
+_retention_thread: threading.Thread | None = None
+_retention_stop = threading.Event()
+_run_retention: RunRetentionService | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -294,6 +298,15 @@ def _scheduler_loop() -> None:
         _scheduler_stop.wait(max(1.0, float(_settings.scheduler_poll_interval_sec)))
 
 
+def _retention_loop() -> None:
+    while not _retention_stop.is_set():
+        try:
+            _build_run_retention().run_cleanup(dry_run=False)
+        except Exception:
+            pass
+        _retention_stop.wait(max(5.0, float(_settings.run_retention_interval_sec)))
+
+
 @app.on_event("startup")
 def _startup_scheduler() -> None:
     global _scheduler_thread
@@ -309,6 +322,23 @@ def _startup_scheduler() -> None:
 @app.on_event("shutdown")
 def _shutdown_scheduler() -> None:
     _scheduler_stop.set()
+
+
+@app.on_event("startup")
+def _startup_retention() -> None:
+    global _retention_thread
+    if not _settings.run_retention_enabled:
+        return
+    if _retention_thread is not None and _retention_thread.is_alive():
+        return
+    _retention_stop.clear()
+    _retention_thread = threading.Thread(target=_retention_loop, daemon=True)
+    _retention_thread.start()
+
+
+@app.on_event("shutdown")
+def _shutdown_retention() -> None:
+    _retention_stop.set()
 
 
 _SKILLS_EVENT_RE = re.compile(r"skills selected iteration=\d+ names=(.+)$")
@@ -716,6 +746,29 @@ def _build_memory_admin() -> MemoryAdminControlPlane:
     return _memory_admin
 
 
+def _build_run_retention() -> RunRetentionService:
+    global _run_retention
+    if _run_retention is None:
+        _run_retention = RunRetentionService(
+            runs_dir=_settings.runs_dir,
+            skill_builds_dir=_settings.skill_builds_dir,
+            config=RetentionConfig(
+                enabled=_settings.run_retention_enabled,
+                interval_sec=_settings.run_retention_interval_sec,
+                keep_finished_days=_settings.run_retention_keep_finished_days,
+                max_runs=_settings.run_retention_max_runs,
+                max_bytes=_settings.run_retention_max_bytes,
+                skill_builds_keep_finished_days=_settings.skill_build_retention_keep_finished_days,
+                skill_builds_max_jobs=_settings.skill_build_retention_max_jobs,
+                skill_builds_max_bytes=_settings.skill_build_retention_max_bytes,
+                experience_success_max_items=_settings.experience_success_max_items,
+                experience_failure_max_items=_settings.experience_failure_max_items,
+                experience_strategy_max_items=_settings.experience_strategy_max_items,
+            ),
+        )
+    return _run_retention
+
+
 def _require_memory_admin_key(
     x_memory_admin_key: str | None,
     query_key: str | None,
@@ -847,6 +900,47 @@ def get_memory_admin_audit(
     admin = _build_memory_admin()
     admin.audit(action="read_audit", actor=principal, status="ok", detail={"limit": limit})
     return {"items": admin.read_audit(limit=limit)}
+
+
+@app.get("/admin/storage/retention/report")
+def retention_report(
+    x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
+    memory_admin_key: str | None = Query(default=None),
+) -> dict:
+    principal = _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    admin = _build_memory_admin()
+    report = _build_run_retention().report()
+    admin.audit(
+        action="retention_report",
+        actor=principal,
+        status="ok",
+        detail={"planned_delete_runs": report.get("summary", {}).get("planned_delete_runs", 0)},
+    )
+    return {"status": "ok", "report": report}
+
+
+@app.post("/admin/storage/retention/run")
+def retention_run(
+    dry_run: bool = Query(default=True),
+    x_memory_admin_key: str | None = Header(default=None, alias="x-memory-admin-key"),
+    memory_admin_key: str | None = Query(default=None),
+) -> dict:
+    principal = _require_memory_admin_key(x_memory_admin_key, memory_admin_key)
+    admin = _build_memory_admin()
+    result = _build_run_retention().run_cleanup(dry_run=dry_run)
+    report = result.get("report", {}) if isinstance(result, dict) else {}
+    summary = report.get("summary", {}) if isinstance(report, dict) else {}
+    admin.audit(
+        action="retention_run",
+        actor=principal,
+        status=str(result.get("status", "ok")),
+        detail={
+            "dry_run": dry_run,
+            "planned_delete_runs": summary.get("planned_delete_runs", 0),
+            "deleted_runs": len(result.get("deleted_run_ids", []) or []),
+        },
+    )
+    return result
 
 
 @app.get("/runs/{run_id}/memory/pending")
@@ -1146,4 +1240,15 @@ def system_config() -> dict:
         "scheduler_poll_interval_sec": _settings.scheduler_poll_interval_sec,
         "scheduler_max_dispatch_per_tick": _settings.scheduler_max_dispatch_per_tick,
         "scheduler_default_timezone": _settings.scheduler_default_timezone,
+        "run_retention_enabled": _settings.run_retention_enabled,
+        "run_retention_interval_sec": _settings.run_retention_interval_sec,
+        "run_retention_keep_finished_days": _settings.run_retention_keep_finished_days,
+        "run_retention_max_runs": _settings.run_retention_max_runs,
+        "run_retention_max_bytes": _settings.run_retention_max_bytes,
+        "skill_build_retention_keep_finished_days": _settings.skill_build_retention_keep_finished_days,
+        "skill_build_retention_max_jobs": _settings.skill_build_retention_max_jobs,
+        "skill_build_retention_max_bytes": _settings.skill_build_retention_max_bytes,
+        "experience_success_max_items": _settings.experience_success_max_items,
+        "experience_failure_max_items": _settings.experience_failure_max_items,
+        "experience_strategy_max_items": _settings.experience_strategy_max_items,
     }
