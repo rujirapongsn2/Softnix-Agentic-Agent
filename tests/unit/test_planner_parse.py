@@ -84,3 +84,32 @@ def test_planner_build_plan_adds_final_iteration_guard() -> None:
     assert plan["done"] is False
     assert usage["total_tokens"] == 2
     assert "Final-iteration guard:" in prompt
+
+
+def test_planner_build_plan_includes_experience_context() -> None:
+    class _FakeProvider:
+        def __init__(self) -> None:
+            self.last_messages = []
+
+        def generate(self, messages, model, max_tokens):  # type: ignore[no-untyped-def]
+            self.last_messages = messages
+            return SimpleNamespace(
+                content='{"thought":"ok","done":false,"actions":[]}',
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+    provider = _FakeProvider()
+    planner = Planner(provider=provider, model="m")
+    plan, usage, prompt = planner.build_plan(
+        task="สรุปข้อมูล",
+        iteration=1,
+        max_iters=10,
+        previous_output="",
+        skills_context="- none",
+        experience_context="Past successful patterns (similar tasks):\n1. task=สรุปข่าว",
+        memory_context="- none",
+    )
+    assert plan["done"] is False
+    assert usage["total_tokens"] == 2
+    assert "Experience:" in prompt
+    assert "Past successful patterns" in prompt

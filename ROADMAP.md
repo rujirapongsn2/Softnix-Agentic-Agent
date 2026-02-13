@@ -23,12 +23,20 @@
   - execution gate สำหรับงานเชิงปฏิบัติการ (กันลูป preparatory-only เช่น read/calc วนโดยไม่ execute จริง)
   - skill contract ระบุ `success_artifacts` และใช้เป็น objective requirement อัตโนมัติใน loop
 - งานคงเหลือ (ต้องทำต่อ):
-  - benchmark เปรียบเทียบ profile/image แต่ละแบบ (duration/success rate/cost)
+  - benchmark เปรียบเทียบ profile/image แต่ละแบบ (duration/success rate/cost) โดยใช้ harness ที่มีแล้ว (`scripts/benchmark_success_rate.sh`)
   - เพิ่ม cold-start/warm-start metrics สำหรับ `per_run` เพื่อตัดสินใจ optimize lifecycle
-  - เพิ่ม semantic success criteria (เช่น command exit expectations, artifact freshness per iteration)
-  - เพิ่ม objective contract จาก task parser ให้ครอบคลุม task เชิงโปรแกรมที่ซับซ้อนขึ้น (นอกเหนือจาก skill contract ที่มีแล้ว)
   - เพิ่ม fallback planner/degraded planning path ให้ robust มากขึ้นสำหรับงานยาวและบริบทใหญ่ (เริ่มต้นแล้ว: retry-on-parse-error)
 - ผลลัพธ์: Agent ทำงาน data/code transformation แบบ end-to-end ได้ด้วยโค้ดที่สร้างเองอย่างปลอดภัยและตรวจสอบย้อนหลังได้
+
+### สถานะล่าสุด: Success-rate improvement (หยุดไว้ก่อนชั่วคราว)
+
+- ทำเสร็จแล้วในรอบนี้:
+  - objective contract parser + path discovery policy
+  - semantic success criteria (`file_absent`, import/text marker checks, freshness/stale guards)
+  - failure strategy memory + repeated-failed-sequence penalty gate
+  - repair-loop gate + confidence gate + auto-escalation สำหรับ auth/network/policy
+  - benchmark harness (`scripts/benchmark_success_rate.sh`, `scripts/benchmark_tasks.txt`)
+- สถานะ: **หยุดพัฒนาต่อไว้ก่อนตามคำขอผู้ใช้**
 
 ## P1 (ทำต่อหลัง P0)
 
@@ -136,8 +144,7 @@
 ## ลำดับแนะนำถัดไป (Next 3)
 
 1. Autonomous framework hardening (ต่อจาก P0-2)
-- เพิ่ม benchmark + metrics ของ runtime profile/image และ lifecycle `per_run`
-- เพิ่ม objective contract parser และ semantic success criteria
+- เพิ่ม benchmark + metrics ของ runtime profile/image และ lifecycle `per_run` (ใช้ harness ที่มี)
 - ลด planner parse error โดยเพิ่ม retry/degraded planning path ใน loop
 
 2. Scheduled Runs / Cron Workflow (Phase 2: Hardening)

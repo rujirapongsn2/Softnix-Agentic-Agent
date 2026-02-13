@@ -80,6 +80,10 @@ class Settings:
     scheduler_poll_interval_sec: float = 15.0
     scheduler_max_dispatch_per_tick: int = 20
     scheduler_default_timezone: str = "Asia/Bangkok"
+    experience_enabled: bool = True
+    experience_store_max_items: int = 1000
+    experience_retrieval_top_k: int = 3
+    experience_retrieval_max_scan: int = 300
 
     def __post_init__(self) -> None:
         if self.safe_commands is None:
@@ -234,6 +238,10 @@ def load_settings() -> Settings:
         scheduler_poll_interval_sec=float(os.getenv("SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC", "15")),
         scheduler_max_dispatch_per_tick=int(os.getenv("SOFTNIX_SCHEDULER_MAX_DISPATCH_PER_TICK", "20")),
         scheduler_default_timezone=os.getenv("SOFTNIX_SCHEDULER_DEFAULT_TIMEZONE", "Asia/Bangkok"),
+        experience_enabled=os.getenv("SOFTNIX_EXPERIENCE_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+        experience_store_max_items=int(os.getenv("SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS", "1000")),
+        experience_retrieval_top_k=int(os.getenv("SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K", "3")),
+        experience_retrieval_max_scan=int(os.getenv("SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN", "300")),
     )
 
 

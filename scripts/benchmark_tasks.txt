@@ -1,0 +1,5 @@
+# one task per line
+สร้างไฟล์ hello.txt ที่มีข้อความ hello softnix แล้วยืนยันผล
+สร้างสคริปต์ Python ชื่อ calc.py เพื่อคำนวณค่าเฉลี่ย [1,2,3,4] แล้วเขียนลง result.txt
+ลบไฟล์ output.txt หากมีอยู่ และยืนยันว่าไฟล์ถูกลบแล้ว
+ช่วยสรุปข้อมูลจาก https://www.softnix.ai แล้วบันทึกลง summary.md

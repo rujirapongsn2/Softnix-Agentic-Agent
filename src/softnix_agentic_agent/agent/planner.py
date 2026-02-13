@@ -16,7 +16,7 @@ Return STRICT JSON only with shape:
   "done": boolean,
   "final_output": "string when done=true else optional",
   "validations": [
-    {"type": "file_exists|text_in_file", "path": "relative/path", "contains": "optional for text_in_file"}
+    {"type": "file_exists|file_absent|text_in_file", "path": "relative/path", "contains": "optional for text_in_file"}
   ],
   "actions": [
     {"name": "list_dir|read_file|write_workspace_file|write_file|run_safe_command|run_shell_command|run_python_code|web_fetch", "params": {...}}
@@ -81,6 +81,7 @@ class Planner:
         max_iters: int,
         previous_output: str,
         skills_context: str,
+        experience_context: str = "",
         memory_context: str = "",
         runtime_guidance: str = "",
     ) -> tuple[dict[str, Any], dict[str, int], str]:
@@ -91,6 +92,7 @@ class Planner:
             f"Previous output: {compact_previous_output or 'N/A'}\n"
             f"Runtime guidance:\n{runtime_guidance or '- none'}\n"
             f"Memory:\n{memory_context or '- none'}\n"
+            f"Experience:\n{experience_context or '- none'}\n"
             f"Skills:\n{skills_context}\n"
             "Return JSON plan now."
         )

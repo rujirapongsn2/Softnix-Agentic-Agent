@@ -130,3 +130,139 @@ def test_resolve_artifact_path_rejects_prefix_escape(tmp_path: Path) -> None:
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "escapes artifacts directory" in str(exc)
+
+
+def test_store_append_and_retrieve_success_experiences(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    store.append_success_experience(
+        {
+            "run_id": "r1",
+            "status": "completed",
+            "task": "สรุปข่าว AI วันนี้",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search", "web-summary"],
+            "action_sequence": ["web_fetch", "write_workspace_file"],
+            "summary": "done",
+        },
+        max_items=100,
+    )
+    store.append_success_experience(
+        {
+            "run_id": "r2",
+            "status": "completed",
+            "task": "ส่งอีเมลแจ้งเตือน",
+            "task_tokens": ["ส่ง", "อีเมล", "แจ้งเตือน"],
+            "selected_skills": ["resend-email"],
+            "action_sequence": ["run_python_code"],
+            "summary": "done",
+        },
+        max_items=100,
+    )
+
+    rows = store.read_success_experiences(limit=10)
+    assert len(rows) == 2
+
+    matched = store.retrieve_success_experiences(
+        task="ช่วยสรุปข่าว AI ให้หน่อย",
+        selected_skills=["tavily-search"],
+        top_k=1,
+        max_scan=10,
+    )
+    assert len(matched) == 1
+    assert matched[0]["run_id"] == "r1"
+
+
+def test_store_retrieve_experiences_skips_preparatory_only_rows(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    store.append_success_experience(
+        {
+            "run_id": "bad1",
+            "status": "completed",
+            "task": "ช่วยหาไฟล์ pdf แล้วสรุป",
+            "task_tokens": ["ช่วย", "หาไฟล์", "pdf", "สรุป"],
+            "selected_skills": ["web-summary"],
+            "action_sequence": ["list_dir", "read_file"],
+            "produced_files": [],
+            "summary": "ไม่พบไฟล์",
+        },
+        max_items=100,
+    )
+    store.append_success_experience(
+        {
+            "run_id": "good1",
+            "status": "completed",
+            "task": "ช่วยหาไฟล์ pdf แล้วสรุป",
+            "task_tokens": ["ช่วย", "หาไฟล์", "pdf", "สรุป"],
+            "selected_skills": ["web-summary"],
+            "action_sequence": ["list_dir", "run_python_code"],
+            "produced_files": ["summary.txt"],
+            "summary": "สรุปแล้ว",
+        },
+        max_items=100,
+    )
+
+    matched = store.retrieve_success_experiences(
+        task="ช่วยหาไฟล์ pdf แล้วสรุป",
+        selected_skills=["web-summary"],
+        top_k=5,
+        max_scan=100,
+    )
+    ids = [row.get("run_id") for row in matched]
+    assert "bad1" not in ids
+    assert "good1" in ids
+
+
+def test_store_append_and_retrieve_failure_experiences(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    store.append_failure_experience(
+        {
+            "run_id": "f1",
+            "status": "failed",
+            "task": "สรุปข่าว AI จากเว็บ",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "เว็บ"],
+            "selected_skills": ["web-summary"],
+            "failure_class": "missing_path",
+            "recommended_strategy": "discover path first",
+        },
+        max_items=100,
+    )
+    store.append_failure_experience(
+        {
+            "run_id": "f2",
+            "status": "failed",
+            "task": "ส่งอีเมลแจ้งเตือน",
+            "task_tokens": ["ส่ง", "อีเมล", "แจ้งเตือน"],
+            "selected_skills": ["resend-email"],
+            "failure_class": "missing_module",
+            "recommended_strategy": "install module",
+        },
+        max_items=100,
+    )
+
+    rows = store.read_failure_experiences(limit=10)
+    assert len(rows) == 2
+
+    matched = store.retrieve_failure_experiences(
+        task="ช่วยสรุปข่าว AI ให้หน่อย",
+        selected_skills=["web-summary"],
+        top_k=1,
+        max_scan=10,
+    )
+    assert len(matched) == 1
+    assert matched[0]["run_id"] == "f1"
+
+
+def test_store_strategy_effectiveness_score(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    key = "failure_class:missing_path"
+    store.append_strategy_outcome(strategy_key=key, success=True, run_id="r1")
+    store.append_strategy_outcome(strategy_key=key, success=True, run_id="r2")
+    store.append_strategy_outcome(strategy_key=key, success=False, run_id="r3")
+    score = store.get_strategy_effectiveness_score(key)
+    assert score > 0
+
+    bad_key = "failure_class:bad_strategy"
+    store.append_strategy_outcome(strategy_key=bad_key, success=False, run_id="r4")
+    store.append_strategy_outcome(strategy_key=bad_key, success=False, run_id="r5")
+    bad_score = store.get_strategy_effectiveness_score(bad_key)
+    assert bad_score < 0

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shutil
 from typing import Any
 
@@ -12,6 +13,11 @@ class FilesystemStore:
     def __init__(self, runs_dir: Path) -> None:
         self.runs_dir = runs_dir
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.experience_dir = self.runs_dir.parent / "experience"
+        self.experience_dir.mkdir(parents=True, exist_ok=True)
+        self.experience_file = self.experience_dir / "success_cases.jsonl"
+        self.failure_experience_file = self.experience_dir / "failure_cases.jsonl"
+        self.strategy_outcomes_file = self.experience_dir / "strategy_outcomes.jsonl"
 
     def run_dir(self, run_id: str) -> Path:
         return self.runs_dir / run_id
@@ -154,6 +160,198 @@ class FilesystemStore:
         self.write_state(state)
         self.log_event(run_id, "cancel requested")
 
+    def append_success_experience(self, payload: dict[str, Any], max_items: int = 1000) -> None:
+        line = {"ts": utc_now_iso(), **payload}
+        with self.experience_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+        cap = max(10, int(max_items))
+        rows = self.read_success_experiences(limit=cap + 50)
+        if len(rows) <= cap:
+            return
+        kept = rows[-cap:]
+        with self.experience_file.open("w", encoding="utf-8") as f:
+            for row in kept:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def read_success_experiences(self, limit: int = 200) -> list[dict[str, Any]]:
+        if not self.experience_file.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in self.experience_file.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except json.JSONDecodeError:
+                continue
+        if limit <= 0:
+            return rows
+        return rows[-int(limit) :]
+
+    def retrieve_success_experiences(
+        self,
+        task: str,
+        selected_skills: list[str],
+        top_k: int = 3,
+        max_scan: int = 300,
+    ) -> list[dict[str, Any]]:
+        if top_k <= 0:
+            return []
+        task_tokens = _experience_tokens(task)
+        if not task_tokens:
+            return []
+        current_skills = {str(x).strip().lower() for x in selected_skills if str(x).strip()}
+        rows = self.read_success_experiences(limit=max(10, int(max_scan)))
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in rows:
+            if str(row.get("status", "")).lower() not in {"completed", "success", "ok"}:
+                continue
+            if not _experience_quality_ok(row):
+                continue
+            past_tokens = {str(x).strip().lower() for x in row.get("task_tokens", []) if str(x).strip()}
+            token_overlap = len(task_tokens.intersection(past_tokens))
+            if token_overlap <= 0:
+                continue
+            past_skills = {str(x).strip().lower() for x in row.get("selected_skills", []) if str(x).strip()}
+            skill_overlap = len(current_skills.intersection(past_skills)) if current_skills else 0
+            score = token_overlap + (skill_overlap * 3)
+            scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], str(item[1].get("ts", ""))), reverse=True)
+        return [row for _, row in scored[: int(top_k)]]
+
+    def append_failure_experience(self, payload: dict[str, Any], max_items: int = 1000) -> None:
+        line = {"ts": utc_now_iso(), **payload}
+        with self.failure_experience_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+        cap = max(10, int(max_items))
+        rows = self.read_failure_experiences(limit=cap + 50)
+        if len(rows) <= cap:
+            return
+        kept = rows[-cap:]
+        with self.failure_experience_file.open("w", encoding="utf-8") as f:
+            for row in kept:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def read_failure_experiences(self, limit: int = 200) -> list[dict[str, Any]]:
+        if not self.failure_experience_file.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in self.failure_experience_file.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except json.JSONDecodeError:
+                continue
+        if limit <= 0:
+            return rows
+        return rows[-int(limit) :]
+
+    def retrieve_failure_experiences(
+        self,
+        task: str,
+        selected_skills: list[str],
+        top_k: int = 2,
+        max_scan: int = 300,
+    ) -> list[dict[str, Any]]:
+        if top_k <= 0:
+            return []
+        task_tokens = _experience_tokens(task)
+        if not task_tokens:
+            return []
+        current_skills = {str(x).strip().lower() for x in selected_skills if str(x).strip()}
+        rows = self.read_failure_experiences(limit=max(10, int(max_scan)))
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in rows:
+            if str(row.get("status", "")).lower() not in {"failed", "error"}:
+                continue
+            past_tokens = {str(x).strip().lower() for x in row.get("task_tokens", []) if str(x).strip()}
+            token_overlap = len(task_tokens.intersection(past_tokens))
+            if token_overlap <= 0:
+                continue
+            past_skills = {str(x).strip().lower() for x in row.get("selected_skills", []) if str(x).strip()}
+            skill_overlap = len(current_skills.intersection(past_skills)) if current_skills else 0
+            has_strategy = 1 if str(row.get("recommended_strategy", "")).strip() else 0
+            strategy_key = str(row.get("strategy_key", "")).strip()
+            strategy_score = self.get_strategy_effectiveness_score(strategy_key) if strategy_key else 0.0
+            score = token_overlap + (skill_overlap * 2) + (has_strategy * 2) + strategy_score
+            scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], str(item[1].get("ts", ""))), reverse=True)
+        return [row for _, row in scored[: int(top_k)]]
+
+    def append_strategy_outcome(
+        self,
+        *,
+        strategy_key: str,
+        success: bool,
+        failure_class: str = "",
+        run_id: str = "",
+        max_items: int = 4000,
+    ) -> None:
+        key = str(strategy_key).strip()
+        if not key:
+            return
+        line = {
+            "ts": utc_now_iso(),
+            "strategy_key": key,
+            "success": bool(success),
+            "failure_class": str(failure_class).strip(),
+            "run_id": str(run_id).strip(),
+        }
+        with self.strategy_outcomes_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+        cap = max(50, int(max_items))
+        rows = self.read_strategy_outcomes(limit=cap + 100)
+        if len(rows) <= cap:
+            return
+        kept = rows[-cap:]
+        with self.strategy_outcomes_file.open("w", encoding="utf-8") as f:
+            for row in kept:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def read_strategy_outcomes(self, limit: int = 1000) -> list[dict[str, Any]]:
+        if not self.strategy_outcomes_file.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in self.strategy_outcomes_file.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except json.JSONDecodeError:
+                continue
+        if limit <= 0:
+            return rows
+        return rows[-int(limit) :]
+
+    def get_strategy_effectiveness_score(self, strategy_key: str, max_scan: int = 1200) -> float:
+        key = str(strategy_key).strip()
+        if not key:
+            return 0.0
+        rows = self.read_strategy_outcomes(limit=max_scan)
+        wins = 0
+        losses = 0
+        for row in rows:
+            if str(row.get("strategy_key", "")).strip() != key:
+                continue
+            if bool(row.get("success", False)):
+                wins += 1
+            else:
+                losses += 1
+        total = wins + losses
+        if total <= 0:
+            return 0.0
+        win_rate = wins / total
+        confidence = min(1.0, total / 8.0)
+        # normalized around 0; positive means historically effective.
+        return (win_rate - 0.5) * 6.0 * confidence
+
 
 def _is_within(path: Path, root: Path) -> bool:
     try:
@@ -161,3 +359,27 @@ def _is_within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _experience_tokens(text: str) -> set[str]:
+    raw = re.findall(r"[a-z0-9ก-๙_-]+", (text or "").lower())
+    out: set[str] = set()
+    for token in raw:
+        item = token.strip()
+        if len(item) < 2:
+            continue
+        out.add(item)
+    return out
+
+
+def _experience_quality_ok(row: dict[str, Any]) -> bool:
+    produced_files = [str(x).strip() for x in row.get("produced_files", []) if str(x).strip()]
+    action_sequence = [str(x).strip() for x in row.get("action_sequence", []) if str(x).strip()]
+    if produced_files:
+        return True
+    if not action_sequence:
+        return False
+    preparatory_only = {"list_dir", "read_file"}
+    if all(action in preparatory_only for action in action_sequence):
+        return False
+    return True

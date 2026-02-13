@@ -164,6 +164,10 @@ pip install -e '.[dev]'
 - `SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR` เปิด/ปิด planner retry ใน iteration เดียวกันเมื่อ parse JSON ไม่ผ่าน (default `true`)
 - `SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS` จำนวนความพยายามสูงสุดของ planner ต่อ iteration เมื่อเจอ parse error (default `2`)
 - `SOFTNIX_WEB_FETCH_TLS_VERIFY` เปิด/ปิด TLS certificate verification สำหรับ `web_fetch` (default `true`)
+- `SOFTNIX_EXPERIENCE_ENABLED` เปิด/ปิดการใช้ successful run patterns ก่อน planner (default `true`)
+- `SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS` จำนวน experience records สูงสุดที่เก็บใน store
+- `SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K` จำนวนเคสสำเร็จที่ดึงมาเป็น context ต่อ iteration
+- `SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN` จำนวน records ย้อนหลังที่ใช้ค้นหาเคสคล้าย
 - `SOFTNIX_MEMORY_PROFILE_FILE` ชื่อไฟล์ profile memory ใน workspace (default `memory/PROFILE.md`)
 - `SOFTNIX_MEMORY_SESSION_FILE` ชื่อไฟล์ session memory ใน workspace (default `memory/SESSION.md`)
 - `SOFTNIX_MEMORY_POLICY_PATH` path ของ global policy memory (admin-managed only)
@@ -608,6 +612,7 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - `.softnix/runs/<run_id>/iterations.jsonl`
 - `.softnix/runs/<run_id>/artifacts/`
 - `.softnix/runs/<run_id>/events.log`
+- `.softnix/experience/success_cases.jsonl` (experience patterns จาก run ที่สำเร็จ)
 
 ## Safe Execution Policy
 
@@ -724,6 +729,38 @@ SOFTNIX_EXEC_CONTAINER_AUTO_INSTALL_MAX_MODULES=6
 - หาก objective ไม่คืบหน้าเกิน threshold (`SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD`) ระบบจะ inject recovery guidance ให้ planner เปลี่ยนกลยุทธ์ (เช่น path recovery / สร้าง output ที่ยังขาด)
 - event จะระบุ `signature=<hash>` และ `actions=<...>` เพื่อช่วย debug root cause ใน timeline
 - ช่วยลดการวนจน `max_iters` โดยไม่คืบหน้า
+
+### Experience + Strategy Memory (Success Rate)
+
+สถานะปัจจุบัน: **Phase 1 เสร็จแล้ว และ pause การพัฒนาต่อชั่วคราว**
+
+- ระบบมี memory 2 ฝั่ง:
+  - success cases: `.softnix/experience/success_cases.jsonl`
+  - failure cases: `.softnix/experience/failure_cases.jsonl`
+- เมื่อ run fail ระบบจะ classify failure class (เช่น `missing_path`, `missing_module`, `auth_secret_invalid`) และบันทึก `recommended_strategy`
+- planner จะได้รับ guidance จากทั้ง success/failure memory ใน iteration ถัดไป
+- มี strategy effectiveness scoring จาก `.softnix/experience/strategy_outcomes.jsonl`
+  - ถ้า strategy เดิมเคยช่วยให้สำเร็จบ่อย จะถูกจัดอันดับสูงขึ้น
+  - ถ้า strategy เดิมพา fail ซ้ำ จะถูก penalize
+- มี plan gates เพิ่มเติม:
+  - `repair_loop_required`: บังคับแผนแก้ปัญหาเชิงปฏิบัติ หลังรอบก่อนหน้า fail
+  - `repeated_failed_sequence`: บล็อก sequence เดิมที่เคยล้มเหลวในงานคล้ายกัน
+- มี confidence gate: ถ้าผล action มีความเชื่อมั่นต่ำ ระบบจะไม่ยอม `done=true` จนกว่าจะมีหลักฐาน/validation เพียงพอ
+- auto-escalation: ถ้าเป็นปัญหาที่ต้องผู้ใช้แก้ (เช่น auth key/network/policy) จะเติมข้อความ actionable ใน final output
+
+### Benchmark Success Rate
+
+รัน benchmark งานชุดมาตรฐานเพื่อวัด success rate และเวลาที่ใช้:
+
+```bash
+cd /Volumes/Seagate/myapp/Softnix-Agentic-Agent
+bash scripts/benchmark_success_rate.sh
+```
+
+- task list อยู่ที่ `/Volumes/Seagate/myapp/Softnix-Agentic-Agent/scripts/benchmark_tasks.txt`
+- ผลลัพธ์จะอยู่ที่ `.softnix/benchmarks/<timestamp>/`
+  - `results.csv`
+  - `summary.txt`
 
 ## Core Memory (Markdown-first)
 

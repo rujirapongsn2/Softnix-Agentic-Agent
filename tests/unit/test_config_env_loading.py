@@ -89,7 +89,11 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
         "SOFTNIX_OBJECTIVE_STAGNATION_REPLAN_THRESHOLD=7\n"
         "SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR=false\n"
         "SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS=4\n"
-        "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n",
+        "SOFTNIX_WEB_FETCH_TLS_VERIFY=false\n"
+        "SOFTNIX_EXPERIENCE_ENABLED=true\n"
+        "SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS=1500\n"
+        "SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K=4\n"
+        "SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN=500\n",
         encoding="utf-8",
     )
 
@@ -124,6 +128,10 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_PLANNER_RETRY_ON_PARSE_ERROR", raising=False)
     monkeypatch.delenv("SOFTNIX_PLANNER_RETRY_MAX_ATTEMPTS", raising=False)
     monkeypatch.delenv("SOFTNIX_WEB_FETCH_TLS_VERIFY", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXPERIENCE_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXPERIENCE_STORE_MAX_ITEMS", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXPERIENCE_RETRIEVAL_TOP_K", raising=False)
+    monkeypatch.delenv("SOFTNIX_EXPERIENCE_RETRIEVAL_MAX_SCAN", raising=False)
 
     settings = load_settings()
     assert settings.exec_timeout_sec == 45
@@ -156,6 +164,10 @@ def test_execution_runtime_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.planner_retry_on_parse_error is False
     assert settings.planner_retry_max_attempts == 4
     assert settings.web_fetch_tls_verify is False
+    assert settings.experience_enabled is True
+    assert settings.experience_store_max_items == 1500
+    assert settings.experience_retrieval_top_k == 4
+    assert settings.experience_retrieval_max_scan == 500
 
 
 def test_memory_config_from_env(tmp_path: Path, monkeypatch) -> None:

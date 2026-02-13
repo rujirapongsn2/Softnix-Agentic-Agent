@@ -398,6 +398,79 @@ def test_loop_objective_validation_blocks_done_when_output_missing(tmp_path: Pat
     assert "missing output file: result.txt" in state.last_output
 
 
+def test_loop_objective_validation_blocks_done_when_delete_target_still_exists(tmp_path: Path) -> None:
+    (tmp_path / "output.txt").write_text("old", encoding="utf-8")
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "final_output": "deleted output.txt",
+                "actions": [],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ลบ output.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "file should be absent but still exists: output.txt" in state.last_output
+
+
+def test_loop_objective_validation_accepts_delete_when_target_removed(tmp_path: Path) -> None:
+    (tmp_path / "output.txt").write_text("old", encoding="utf-8")
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {
+                            "code": (
+                                "from pathlib import Path\n"
+                                "Path('output.txt').unlink(missing_ok=True)\n"
+                                "print('deleted')\n"
+                            )
+                        },
+                    },
+                ],
+                "final_output": "deleted",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ลบ output.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert (tmp_path / "output.txt").exists() is False
+
+
 def test_loop_objective_validation_accepts_valid_file_exists_check(tmp_path: Path) -> None:
     provider = FakeProvider(
         outputs=[
@@ -592,6 +665,108 @@ def test_loop_objective_validation_accepts_when_task_requires_numpy_and_script_i
 
     assert state.stop_reason == StopReason.COMPLETED
     assert (tmp_path / "stats.txt").exists() is True
+
+
+def test_loop_semantic_checks_validate_import_and_expected_text_marker(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "install_and_check.py",
+                            "content": "import humanize\nprint(humanize.__version__)\n",
+                        },
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "output.txt",
+                            "content": "ok\n",
+                        },
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "result.txt",
+                            "content": "ok\nhumanize 4.12.3\n",
+                        },
+                    },
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task=(
+            "สร้างสคริปต์ Python ชื่อ install_and_check.py ที่ทำ 3 ขั้นตอน: "
+            "(1) ติดตั้ง package humanize ด้วย pip "
+            "(2) import humanize แล้วสร้างไฟล์ output.txt ที่มีข้อความ 'ok' "
+            "(3) print เวอร์ชัน humanize แล้วบันทึกผลลง result.txt"
+        ),
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+
+
+def test_loop_semantic_checks_fail_when_expected_marker_missing(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "install_and_check.py",
+                            "content": "import humanize\nprint(humanize.__version__)\n",
+                        },
+                    },
+                    {
+                        "name": "write_workspace_file",
+                        "params": {
+                            "path": "result.txt",
+                            "content": "humanize 4.12.3\n",
+                        },
+                    },
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task=(
+            "สร้างสคริปต์ Python ชื่อ install_and_check.py ที่ทำ 3 ขั้นตอน: "
+            "(1) ติดตั้ง package humanize ด้วย pip "
+            "(2) import humanize "
+            "(3) print เวอร์ชัน humanize แล้วบันทึกผลลง result.txt ที่มีข้อความ 'ok'"
+        ),
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert "text not found in result.txt: ok" in state.last_output
 
 
 def test_loop_logs_selected_skills_in_events(tmp_path: Path) -> None:
@@ -2050,3 +2225,242 @@ def test_loop_execution_gate_replans_preparatory_only_plan(tmp_path: Path) -> No
     assert state.stop_reason == StopReason.COMPLETED
     events = store.read_events(state.run_id)
     assert any("plan gate triggered iteration=2 reason=preparatory_only" in e for e in events)
+
+
+def test_loop_injects_experience_context_from_success_history(tmp_path: Path) -> None:
+    provider = CapturingProvider(
+        outputs=[
+            {
+                "done": True,
+                "final_output": "done",
+                "actions": [{"name": "write_workspace_file", "params": {"path": "result.txt", "content": "ok"}}],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    store.append_success_experience(
+        {
+            "run_id": "old-success",
+            "status": "completed",
+            "task": "สรุปข่าว AI วันนี้",
+            "task_tokens": ["สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search"],
+            "action_sequence": ["web_fetch", "write_workspace_file"],
+            "summary": "สรุปเรียบร้อย",
+        },
+        max_items=100,
+    )
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยสรุปข่าว AI วันนี้",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert provider.user_prompts
+    assert "Experience:" in provider.user_prompts[0]
+    assert "Past successful patterns" in provider.user_prompts[0]
+
+
+def test_loop_records_success_experience_when_completed(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "final_output": "done",
+                "actions": [{"name": "write_workspace_file", "params": {"path": "result.txt", "content": "ok"}}],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียน result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    rows = store.read_success_experiences(limit=10)
+    assert any(row.get("run_id") == state.run_id for row in rows)
+
+
+def test_loop_skips_low_signal_experience_for_document_task(tmp_path: Path) -> None:
+    provider = FakeProvider(outputs=[{"done": True, "final_output": "ไม่พบไฟล์ pdf", "actions": [{"name": "list_dir", "params": {"path": "."}}]}])
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยหาไฟล์ pdf แล้วอ่านข้อมูล สรุป ใคร อะไร ที่ไหน อย่างไร",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    rows = store.read_success_experiences(limit=10)
+    assert all(row.get("run_id") != state.run_id for row in rows)
+    events = store.read_events(state.run_id)
+    assert any("experience skipped reason=low_signal_or_preparatory_only" in e for e in events)
+
+
+def test_loop_records_failure_experience_when_failed(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "final_output": "saved",
+                "actions": [{"name": "run_python_code", "params": {"code": "print('noop')"}}],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เขียนผลลัพธ์ลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    rows = store.read_failure_experiences(limit=20)
+    row = next((x for x in rows if x.get("run_id") == state.run_id), None)
+    assert row is not None
+    assert str(row.get("failure_class", "")).strip() in {"missing_path", "objective_validation_failed"}
+    assert "run_python_code" in [str(x).strip() for x in row.get("action_sequence", [])]
+
+
+def test_loop_injects_failure_strategy_guidance_from_history(tmp_path: Path) -> None:
+    provider = CapturingProvider(
+        outputs=[
+            {
+                "done": True,
+                "final_output": "done",
+                "actions": [{"name": "write_workspace_file", "params": {"path": "result.txt", "content": "ok"}}],
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    store.append_failure_experience(
+        {
+            "run_id": "old-failure",
+            "status": "failed",
+            "task": "ช่วยสรุปข่าว AI วันนี้",
+            "task_tokens": ["ช่วย", "สรุป", "ข่าว", "ai", "วันนี้"],
+            "selected_skills": ["tavily-search"],
+            "failure_class": "missing_path",
+            "recommended_strategy": "discover path first then continue execution",
+        },
+        max_items=100,
+    )
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยสรุปข่าว AI วันนี้ แล้วบันทึกลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    assert provider.user_prompts
+    assert "Failure avoidance strategies" in provider.user_prompts[0]
+
+
+def test_loop_replans_when_plan_repeats_failed_action_sequence(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {"done": False, "actions": [{"name": "run_python_code", "params": {"code": "print('same')"}}]},
+            {"done": True, "actions": [{"name": "write_workspace_file", "params": {"path": "result.txt", "content": "ok"}}]},
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    store.append_failure_experience(
+        {
+            "run_id": "old-fail-seq",
+            "status": "failed",
+            "task": "สร้างไฟล์ผลลัพธ์จาก python",
+            "task_tokens": ["สร้าง", "ไฟล์", "ผลลัพธ์", "python"],
+            "selected_skills": [],
+            "action_sequence": ["run_python_code"],
+            "failure_class": "objective_validation_failed",
+            "recommended_strategy": "avoid pure run_python_code-only loop",
+        },
+        max_items=100,
+    )
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="สร้างไฟล์ผลลัพธ์จาก python แล้วบันทึกลง result.txt",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.stop_reason == StopReason.COMPLETED
+    events = store.read_events(state.run_id)
+    assert any("plan gate triggered iteration=1 reason=repeated_failed_sequence" in e for e in events)
+
+
+def test_loop_auto_escalation_appends_actionable_message_for_auth_failure(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": True,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {"code": "raise RuntimeError('unauthorized: invalid api key')"},
+                    }
+                ],
+                "final_output": "done",
+            }
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="เรียก API ภายนอกแล้วบันทึกผล",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=1,
+    )
+
+    assert state.status == RunStatus.FAILED
+    assert "[auto-escalation]" in state.last_output
