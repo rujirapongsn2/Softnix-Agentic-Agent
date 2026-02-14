@@ -176,6 +176,91 @@ def test_loop_does_not_auto_complete_side_effect_task_at_max_iters(tmp_path: Pat
     assert state.status == RunStatus.FAILED
 
 
+def test_loop_does_not_auto_complete_answer_only_if_previous_iterations_failed(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        outputs=[
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {"code": "import missing_module_xyz"},
+                    }
+                ],
+            },
+            {
+                "done": False,
+                "final_output": "สรุปข้อมูลเสร็จแล้ว",
+                "actions": [],
+            },
+        ]
+    )
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(workspace=tmp_path, runs_dir=tmp_path / "runs", skills_dir=tmp_path)
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="ช่วยสรุปข้อมูลวันนี้ให้หน่อย",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=2,
+    )
+
+    assert state.stop_reason == StopReason.MAX_ITERS
+    assert state.status == RunStatus.FAILED
+
+
+def test_loop_stops_intermittent_failure_loop_without_progress(tmp_path: Path) -> None:
+    alternating_outputs = []
+    for _ in range(12):
+        alternating_outputs.append(
+            {
+                "done": False,
+                "actions": [
+                    {
+                        "name": "run_python_code",
+                        "params": {"code": "import missing_module_xyz"},
+                    }
+                ],
+            }
+        )
+        alternating_outputs.append(
+            {
+                "done": False,
+                "actions": [{"name": "list_dir", "params": {"path": "."}}],
+            }
+        )
+
+    provider = FakeProvider(outputs=alternating_outputs)
+    planner = Planner(provider=provider, model="m")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        capability_failure_streak_threshold=3,
+        objective_stagnation_replan_threshold=2,
+    )
+    store = FilesystemStore(settings.runs_dir)
+    runner = AgentLoopRunner(settings=settings, planner=planner, store=store)
+
+    state = runner.start_run(
+        task="demo objective",
+        provider_name="openai",
+        model="m",
+        workspace=tmp_path,
+        skills_dir=tmp_path,
+        max_iters=30,
+    )
+
+    assert state.stop_reason == StopReason.NO_PROGRESS
+    assert state.status == RunStatus.FAILED
+    assert state.iteration < 30
+    assert "without progress" in (state.last_output or "")
+
+
 def test_loop_write_workspace_file_is_snapshotted_as_artifact(tmp_path: Path) -> None:
     provider = FakeProvider(
         outputs=[

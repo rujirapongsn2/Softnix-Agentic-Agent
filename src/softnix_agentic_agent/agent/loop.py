@@ -151,9 +151,12 @@ class AgentLoopRunner:
         is_skill_build_task = self._is_skill_build_task(state.task)
         task_intent = self._infer_task_intent_label(state.task)
         selected_for_runtime = [] if is_skill_build_task else skill_loader.select_skills(task=state.task)
+        run_requires_web_intel_contract = self._task_requires_web_intel_contract(state.task) or self._selected_skills_include_web_intel(
+            selected_for_runtime
+        )
         task_contract = self._task_contract_parser.parse(
             task=state.task,
-            enforce_web_intel_contract=self._task_requires_web_intel_contract(state.task),
+            enforce_web_intel_contract=run_requires_web_intel_contract,
         )
         runtime_image, runtime_profile = self._resolve_container_runtime_image(state.task, selected_for_runtime)
         if self.settings.exec_runtime == "container":
@@ -225,6 +228,8 @@ class AgentLoopRunner:
         active_strategy_keys: set[str] = set()
         repeated_failure_class = ""
         repeated_failure_class_count = 0
+        total_failed_actions_in_run = 0
+        recent_failure_window: list[bool] = []
 
         try:
             if state.iteration == 0:
@@ -602,6 +607,8 @@ class AgentLoopRunner:
                         ]
                     )
                 has_failed_action = any(not bool(result.get("ok")) for result in action_results)
+                failed_actions_in_iteration = sum(1 for result in action_results if not bool(result.get("ok")))
+                total_failed_actions_in_run += failed_actions_in_iteration
                 iteration_failure_class = ""
                 if has_failed_action or ("[validation] failed" in output.lower()):
                     iteration_failure = self._classify_failure(
@@ -647,6 +654,8 @@ class AgentLoopRunner:
                         required_absent=required_absent,
                         required_python_modules=task_contract.required_python_modules,
                         expected_text_markers=task_contract.expected_text_markers,
+                        inferred_outputs=required_outputs,
+                        force_web_intel_contract=run_requires_web_intel_contract,
                     )
                     plan["validation"] = validation_report
                     if not validation_report["ok"]:
@@ -711,6 +720,7 @@ class AgentLoopRunner:
                         action_history=successful_action_history,
                         produced_files=produced_files_in_run,
                         task_intent=task_intent,
+                        failed_action_count=total_failed_actions_in_run,
                     )
                     self.store.write_state(state)
                     return state
@@ -723,6 +733,8 @@ class AgentLoopRunner:
                         required_absent=required_absent,
                         required_python_modules=task_contract.required_python_modules,
                         expected_text_markers=task_contract.expected_text_markers,
+                        inferred_outputs=required_outputs,
+                        force_web_intel_contract=run_requires_web_intel_contract,
                     )
                     if auto_complete_report.get("checks") and auto_complete_report.get("ok"):
                         state.status = RunStatus.COMPLETED
@@ -735,6 +747,7 @@ class AgentLoopRunner:
                             action_history=successful_action_history,
                             produced_files=produced_files_in_run,
                             task_intent=task_intent,
+                            failed_action_count=total_failed_actions_in_run,
                         )
                         self.store.write_state(state)
                         self.store.log_event(
@@ -837,6 +850,33 @@ class AgentLoopRunner:
                     )
                     return state
 
+                recent_failure_window.append(has_failed_action)
+                window_size = max(4, capability_guard_threshold * 2)
+                if len(recent_failure_window) > window_size:
+                    recent_failure_window = recent_failure_window[-window_size:]
+                intermittent_failures = sum(1 for item in recent_failure_window if item)
+                stagnation_threshold = max(2, int(self.settings.objective_stagnation_replan_threshold))
+                if (
+                    len(recent_failure_window) >= window_size
+                    and intermittent_failures >= capability_guard_threshold
+                    and objective_stagnation_streak >= stagnation_threshold
+                ):
+                    state.status = RunStatus.FAILED
+                    state.stop_reason = StopReason.NO_PROGRESS
+                    state.last_output = (
+                        "stopped: intermittent failure loop without progress "
+                        f"(window={window_size}, failures={intermittent_failures})"
+                    )
+                    state.updated_at = utc_now_iso()
+                    self.store.write_state(state)
+                    self.store.log_event(
+                        state.run_id,
+                        "stopped: intermittent_failure_loop "
+                        f"window={window_size} failures={intermittent_failures} "
+                        f"stagnation={objective_stagnation_streak}",
+                    )
+                    return state
+
                 current_sig = self._build_iteration_signature(actions=actions, action_results=action_results, output=output)
                 if current_sig == previous_iteration_signature:
                     repeated_iteration_count += 1
@@ -866,6 +906,7 @@ class AgentLoopRunner:
                 required_outputs=required_outputs,
                 last_output=state.last_output,
                 last_action_results=previous_action_results,
+                failed_action_count=total_failed_actions_in_run,
             ):
                 state.status = RunStatus.COMPLETED
                 state.stop_reason = StopReason.COMPLETED
@@ -876,6 +917,7 @@ class AgentLoopRunner:
                     action_history=successful_action_history,
                     produced_files=produced_files_in_run,
                     task_intent=task_intent,
+                    failed_action_count=total_failed_actions_in_run,
                 )
                 self.store.write_state(state)
                 self.store.log_event(
@@ -1113,8 +1155,10 @@ class AgentLoopRunner:
         required_absent: list[str] | None = None,
         required_python_modules: list[str] | None = None,
         expected_text_markers: list[str] | None = None,
+        inferred_outputs: list[str] | None = None,
+        force_web_intel_contract: bool | None = None,
     ) -> dict[str, Any]:
-        inferred_paths = set(self._infer_output_files_from_task(task))
+        inferred_paths = set(inferred_outputs or self._infer_output_files_from_task(task))
         if not inferred_paths:
             return {"ok": False, "failures": ["no inferred outputs"], "checks": []}
         missing_in_run = sorted(path for path in inferred_paths if path not in produced_files)
@@ -1132,6 +1176,8 @@ class AgentLoopRunner:
             required_absent=required_absent or [],
             required_python_modules=required_python_modules or [],
             expected_text_markers=expected_text_markers or [],
+            inferred_outputs=list(inferred_paths),
+            force_web_intel_contract=force_web_intel_contract,
         )
 
     def _should_auto_complete_answer_only_on_max_iters(
@@ -1140,8 +1186,11 @@ class AgentLoopRunner:
         required_outputs: list[str],
         last_output: str,
         last_action_results: list[dict[str, Any]],
+        failed_action_count: int = 0,
     ) -> bool:
         if required_outputs:
+            return False
+        if int(failed_action_count) > 0:
             return False
         if not self._is_answer_only_task(task):
             return False
@@ -1931,6 +1980,7 @@ class AgentLoopRunner:
         action_history: list[str],
         produced_files: set[str],
         task_intent: str,
+        failed_action_count: int = 0,
     ) -> None:
         if not self.settings.experience_enabled:
             return
@@ -1946,6 +1996,7 @@ class AgentLoopRunner:
             task=state.task,
             action_sequence=unique_actions,
             produced_files=produced_files,
+            failed_action_count=failed_action_count,
         ):
             self.store.log_event(
                 state.run_id,
@@ -1963,11 +2014,13 @@ class AgentLoopRunner:
             "action_sequence": unique_actions[:20],
             "produced_files": sorted(str(x) for x in produced_files)[:50],
             "summary": (state.last_output or "")[:500],
+            "failed_action_count": int(max(0, failed_action_count)),
             "quality_score": self._experience_quality_score(
                 task=state.task,
                 action_sequence=unique_actions,
                 produced_files=produced_files,
                 summary=state.last_output,
+                failed_action_count=failed_action_count,
             ),
         }
         self.store.append_success_experience(payload, max_items=self.settings.experience_store_max_items)
@@ -2302,7 +2355,10 @@ class AgentLoopRunner:
         task: str,
         action_sequence: list[str],
         produced_files: set[str],
+        failed_action_count: int = 0,
     ) -> bool:
+        if int(failed_action_count) > 0 and not produced_files:
+            return False
         if produced_files:
             return True
         actions = [str(x).strip() for x in action_sequence if str(x).strip()]
@@ -2344,6 +2400,7 @@ class AgentLoopRunner:
         action_sequence: list[str],
         produced_files: set[str],
         summary: str | None,
+        failed_action_count: int = 0,
     ) -> float:
         score = 0.0
         if produced_files:
@@ -2361,6 +2418,8 @@ class AgentLoopRunner:
             score += min(0.18, len(summary_text) / 1200.0)
             if "[validation] failed" in summary_text.lower():
                 score -= 0.2
+        if int(failed_action_count) > 0:
+            score -= min(0.45, float(failed_action_count) * 0.05)
         if score < 0.0:
             return 0.0
         if score > 1.0:
@@ -2791,6 +2850,8 @@ class AgentLoopRunner:
         required_absent: list[str] | None = None,
         required_python_modules: list[str] | None = None,
         expected_text_markers: list[str] | None = None,
+        inferred_outputs: list[str] | None = None,
+        force_web_intel_contract: bool | None = None,
     ) -> dict[str, Any]:
         checks = self._collect_validation_checks(
             task=task,
@@ -2799,18 +2860,25 @@ class AgentLoopRunner:
             required_absent=required_absent or [],
             required_python_modules=required_python_modules or [],
             expected_text_markers=expected_text_markers or [],
+            inferred_outputs=inferred_outputs,
+            force_web_intel_contract=force_web_intel_contract,
         )
         if not checks:
             return {"ok": True, "failures": [], "checks": []}
 
         failures: list[str] = []
-        inferred_paths = self._infer_output_files_from_task(task)
+        inferred_paths = list(inferred_outputs or self._infer_output_files_from_task(task))
         if produced_files is not None and inferred_paths:
             missing_in_run = sorted(path for path in inferred_paths if path not in produced_files)
             for path in missing_in_run:
                 failures.append(f"inferred output not produced in this run: {path}")
 
-        if produced_files is not None and self._task_requires_web_intel_contract(task):
+        require_web_intel = (
+            bool(force_web_intel_contract)
+            if force_web_intel_contract is not None
+            else self._task_requires_web_intel_contract(task)
+        )
+        if produced_files is not None and require_web_intel:
             expected_web_intel_paths = {
                 str(item.get("path", "")).strip()
                 for item in checks
@@ -2907,6 +2975,8 @@ class AgentLoopRunner:
         required_absent: list[str] | None = None,
         required_python_modules: list[str] | None = None,
         expected_text_markers: list[str] | None = None,
+        inferred_outputs: list[str] | None = None,
+        force_web_intel_contract: bool | None = None,
     ) -> list[dict[str, str]]:
         checks: list[dict[str, str]] = []
         raw_validations = plan.get("validations")
@@ -2940,7 +3010,7 @@ class AgentLoopRunner:
                         payload["value"] = value
                     checks.append(payload)
 
-        inferred_files = self._infer_output_files_from_task(task)
+        inferred_files = list(inferred_outputs or self._infer_output_files_from_task(task))
         for path in inferred_files:
             checks.append({"type": "file_exists", "path": path})
             if self._should_require_non_empty_output(path):
@@ -2986,7 +3056,11 @@ class AgentLoopRunner:
 
         # For fetch-first web-intel tasks, require script-generated markers
         # so "manual summary/meta writing" does not silently pass objective checks.
-        is_web_intel_task = self._task_requires_web_intel_contract(task)
+        is_web_intel_task = (
+            bool(force_web_intel_contract)
+            if force_web_intel_contract is not None
+            else self._task_requires_web_intel_contract(task)
+        )
         if is_web_intel_task:
             lowered_task = (task or "").lower()
             has_meta = ("web_intel/meta.json" in inferred_files) or ("web_intel/meta.json" in lowered_task)
@@ -3051,10 +3125,19 @@ class AgentLoopRunner:
                     return True
         return False
 
-    def _infer_output_files_from_task(self, task: str) -> list[str]:
+    def _infer_output_files_from_task(
+        self,
+        task: str,
+        enforce_web_intel_contract: bool | None = None,
+    ) -> list[str]:
+        force_web_intel = (
+            bool(enforce_web_intel_contract)
+            if enforce_web_intel_contract is not None
+            else self._task_requires_web_intel_contract(task)
+        )
         contract = self._task_contract_parser.parse(
             task=task,
-            enforce_web_intel_contract=self._task_requires_web_intel_contract(task),
+            enforce_web_intel_contract=force_web_intel,
         )
         return list(contract.required_outputs)
 
@@ -3154,6 +3237,13 @@ class AgentLoopRunner:
             return True
         # If task explicitly asks to read these files, enforce contract as well.
         return ("web_intel/meta.json" in lowered) or ("web_intel/summary.md" in lowered)
+
+    def _selected_skills_include_web_intel(self, selected_skills: list[Any] | None) -> bool:
+        for item in selected_skills or []:
+            name = str(getattr(item, "name", item) or "").strip().lower()
+            if name in {"web-intel", "web_intel"}:
+                return True
+        return False
 
     def _sanitize_task_and_materialize_secrets(self, task: str, workspace: Path) -> tuple[str, list[str]]:
         text = (task or "").strip()

@@ -16,3 +16,26 @@ def test_final_run_text_truncates_output_to_4000_chars() -> None:
     last = text.splitlines()[-1]
     assert len(last) == FINAL_OUTPUT_MAX_CHARS
 
+
+def test_final_run_text_converts_markdown_to_plain_text() -> None:
+    raw = (
+        "## หัวข้อ\n\n"
+        "**ลูกค้า:** SCG\n"
+        "### รายการ\n"
+        "| รายการ | จำนวน | ราคา |\n"
+        "|---|---|---|\n"
+        "| Service A | 1 | 100 |\n"
+    )
+    text = final_run_text(
+        run_id="r2",
+        status="completed",
+        iteration=2,
+        max_iters=10,
+        stop_reason="completed",
+        output=raw,
+    )
+    assert "##" not in text
+    assert "**" not in text
+    assert "ลูกค้า: SCG" in text
+    assert "รายการ | จำนวน | ราคา" in text
+    assert "Service A | 1 | 100" in text

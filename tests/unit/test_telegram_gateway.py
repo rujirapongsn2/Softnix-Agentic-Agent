@@ -14,6 +14,7 @@ class FakeTelegramClient:
         self.sent_messages: list[tuple[str, str]] = []
         self.sent_documents: list[tuple[str, str, str]] = []
         self.updates: list[dict] = []
+        self.files: dict[str, tuple[str, bytes]] = {}
 
     def send_message(self, chat_id: str, text: str) -> dict:
         self.sent_messages.append((chat_id, text))
@@ -25,6 +26,19 @@ class FakeTelegramClient:
 
     def get_updates(self, offset=None, timeout=0, limit=20):  # type: ignore[no-untyped-def]
         return self.updates
+
+    def get_file_path(self, file_id: str) -> str:
+        item = self.files.get(str(file_id))
+        if not item:
+            raise ValueError("file not found")
+        return item[0]
+
+    def download_file_bytes(self, file_path: str) -> bytes:
+        target = str(file_path)
+        for _, (path, content) in self.files.items():
+            if str(path) == target:
+                return bytes(content)
+        raise ValueError("file_path not found")
 
 
 class FakeRunner:
@@ -619,3 +633,86 @@ def test_gateway_skill_build_auto_notify_completion(tmp_path: Path) -> None:
             thread.join(timeout=2)
     assert any("Skill build started: job555" in text for _, text in fake_client.sent_messages)
     assert any("Skill build job555: completed" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_document_upload_with_caption_starts_run(tmp_path: Path, monkeypatch) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=False,
+    )
+    fake_client = FakeTelegramClient()
+    fake_client.files["f-001"] = ("docs/Google-inv.pdf", b"%PDF-1.7 fake")
+    threads: dict[str, threading.Thread] = {}
+    fake_runner = FakeRunner(store=store, workspace=tmp_path)
+
+    monkeypatch.setattr(
+        "softnix_agentic_agent.integrations.telegram_gateway.build_runner",
+        lambda settings, provider_name, model=None: fake_runner,
+    )
+
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry=threads, client=fake_client)
+    ok = gateway.handle_update(
+        {
+            "update_id": 90,
+            "message": {
+                "chat": {"id": 8388377631},
+                "caption": "สกัดยอดที่ต้องชำระจากใบแจ้งหนี้นี้",
+                "document": {
+                    "file_id": "f-001",
+                    "file_name": "Google-inv.pdf",
+                    "file_size": 1024,
+                },
+            },
+        }
+    )
+    assert ok is True
+    assert (tmp_path / "inputs" / "Google-inv.pdf").exists()
+    assert "tg-run-1" in threads
+    threads["tg-run-1"].join(timeout=2)
+    assert any("Uploaded file: inputs/Google-inv.pdf" in text for _, text in fake_client.sent_messages)
+    assert any("Started run: tg-run-1" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_document_upload_without_caption_only_confirms_upload(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=False,
+    )
+    fake_client = FakeTelegramClient()
+    fake_client.files["f-002"] = ("docs/invoice.pdf", b"pdf-bytes")
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok = gateway.handle_update(
+        {
+            "update_id": 91,
+            "message": {
+                "chat": {"id": 8388377631},
+                "document": {
+                    "file_id": "f-002",
+                    "file_name": "invoice.pdf",
+                    "file_size": 9,
+                },
+            },
+        }
+    )
+    assert ok is True
+    assert (tmp_path / "inputs" / "invoice.pdf").exists()
+    assert "Send task text" in fake_client.sent_messages[-1][1]

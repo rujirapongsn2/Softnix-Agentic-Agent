@@ -120,6 +120,33 @@ def test_rm_rejects_outside_workspace(tmp_path: Path) -> None:
     assert "workspace" in (result.error or "")
 
 
+def test_find_allows_dot_in_workspace(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["find"])
+    result = ex.execute({"name": "run_safe_command", "params": {"command": "find . -maxdepth 1 -type f"}})
+    assert result.ok is True
+    assert "a.txt" in (result.output or "")
+
+
+def test_find_allows_relative_workspace_path(tmp_path: Path) -> None:
+    sub = tmp_path / "inputs"
+    sub.mkdir(parents=True, exist_ok=True)
+    (sub / "invoice.pdf").write_text("x", encoding="utf-8")
+    ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["find"])
+    result = ex.execute(
+        {"name": "run_safe_command", "params": {"command": "find", "args": ["inputs", "-maxdepth", "1", "-type", "f"]}}
+    )
+    assert result.ok is True
+    assert "invoice.pdf" in (result.output or "")
+
+
+def test_find_rejects_absolute_path_outside_workspace(tmp_path: Path) -> None:
+    ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["find"])
+    result = ex.execute({"name": "run_safe_command", "params": {"command": "find / -maxdepth 1 -type f"}})
+    assert result.ok is False
+    assert "workspace" in (result.error or "")
+
+
 def test_run_python_code_rejects_non_allowlisted_binary(tmp_path: Path) -> None:
     ex = SafeActionExecutor(workspace=tmp_path, safe_commands=["ls"])
     result = ex.execute(

@@ -12,6 +12,7 @@ import {
   ListTodo,
   LoaderCircle,
   PauseCircle,
+  Paperclip,
   PlayCircle,
   SendHorizontal,
   ShieldCheck,
@@ -383,6 +384,7 @@ export function App() {
   const [uploadPending, setUploadPending] = useState(false);
   const [uploadInfo, setUploadInfo] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadAdvanced, setUploadAdvanced] = useState(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactDownloadingPath, setArtifactDownloadingPath] = useState<string | null>(null);
@@ -406,6 +408,7 @@ export function App() {
 
   const streamRef = useRef<EventSource | null>(null);
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedRun = useMemo(() => runs.find((r) => r.run_id === selectedRunId) ?? null, [runs, selectedRunId]);
   const selectedRunSummary = useMemo(() => finalSummary(selectedRun), [selectedRun]);
@@ -823,26 +826,63 @@ export function App() {
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 shadow-sm outline-none transition placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
               />
               <div className="rounded-md border border-border bg-secondary/40 p-2">
-                <div className="mb-2 text-[11px] text-muted-foreground">Upload file to workspace</div>
-                <input
-                  className="mb-2 block w-full text-xs"
-                  type="file"
-                  onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
-                />
-                <Input
-                  value={uploadPath}
-                  onChange={(e) => setUploadPath(e.target.value)}
-                  placeholder="target path, e.g. inputs/"
-                />
-                <Button
-                  variant="secondary"
-                  className="mt-2 w-full"
-                  onClick={onUploadWorkspaceFile}
-                  disabled={uploadPending}
-                >
-                  {uploadPending ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  Upload
-                </Button>
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={uploadInputRef}
+                    className="hidden"
+                    type="file"
+                    onChange={(e) => {
+                      setUploadFile(e.target.files?.[0] ?? null);
+                      setUploadInfo(null);
+                      setUploadError(null);
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="h-8 px-2"
+                    onClick={() => uploadInputRef.current?.click()}
+                  >
+                    <Paperclip className="mr-1 h-3.5 w-3.5" />
+                    Attach
+                  </Button>
+                  <div className="min-w-0 flex-1 text-xs text-muted-foreground">
+                    {uploadFile ? (
+                      <span className="truncate">1 file: {uploadFile.name}</span>
+                    ) : (
+                      <span>No file selected</span>
+                    )}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-8 px-3"
+                    onClick={onUploadWorkspaceFile}
+                    disabled={uploadPending || !uploadFile}
+                  >
+                    {uploadPending ? <LoaderCircle className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                    Upload
+                  </Button>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[11px]">
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => setUploadAdvanced((prev) => !prev)}
+                  >
+                    {uploadAdvanced ? "Hide advanced" : "Advanced path"}
+                  </button>
+                  <span className="text-muted-foreground">default: inputs/</span>
+                </div>
+                {uploadAdvanced ? (
+                  <div className="mt-2">
+                    <Input
+                      value={uploadPath}
+                      onChange={(e) => setUploadPath(e.target.value)}
+                      placeholder="target path, e.g. inputs/"
+                    />
+                  </div>
+                ) : null}
                 {uploadInfo ? <div className="mt-2 text-[11px] text-muted-foreground">{uploadInfo}</div> : null}
                 {uploadError ? <div className="mt-2 text-[11px] text-red-600">{uploadError}</div> : null}
               </div>

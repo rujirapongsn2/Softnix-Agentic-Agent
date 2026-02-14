@@ -185,6 +185,8 @@ class SafeActionExecutor:
         if base == "rm":
             parts = self._hydrate_rm_targets(parts, params)
             self._validate_rm_paths(parts)
+        if base == "find":
+            self._validate_find_paths(parts)
 
         command_parts = self._replace_python_base_with_runtime_venv(parts)
         proc = self._run_python_with_auto_install_if_needed(
@@ -522,6 +524,39 @@ class SafeActionExecutor:
 
         for target in targets:
             self._resolve_workspace_path(target)
+
+    def _validate_find_paths(self, parts: list[str]) -> None:
+        if not parts:
+            raise ValueError("Invalid find command")
+        if parts[0] != "find":
+            return
+        tokens = parts[1:]
+        if not tokens:
+            return
+
+        path_tokens: list[str] = []
+        for token in tokens:
+            if token == "--":
+                continue
+            if self._is_find_expression_token(token):
+                break
+            path_tokens.append(token)
+
+        if not path_tokens:
+            path_tokens = ["."]
+        for target in path_tokens:
+            normalized = str(target).strip()
+            if not normalized or normalized == ".":
+                continue
+            self._resolve_workspace_path(normalized)
+
+    def _is_find_expression_token(self, token: str) -> bool:
+        text = str(token).strip()
+        if not text:
+            return False
+        if text in {"(", ")", "!"}:
+            return True
+        return text.startswith("-")
 
     def _web_fetch(self, params: dict[str, Any]) -> ActionResult:
         url = str(params.get("url", "")).strip()

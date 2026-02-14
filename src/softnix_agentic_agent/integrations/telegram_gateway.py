@@ -75,13 +75,24 @@ class TelegramGateway:
         chat = message.get("chat") or {}
         chat_id = str(chat.get("id") or "").strip()
         text = str(message.get("text") or "").strip()
-        if not chat_id or not text:
+        caption = str(message.get("caption") or "").strip()
+        has_document = isinstance(message.get("document"), dict)
+        if not chat_id:
             return False
 
         if not self._is_allowed_chat(chat_id):
             self._increment_metric("unauthorized_chats")
             self.client.send_message(chat_id, "Unauthorized chat")
             return True
+
+        if has_document:
+            response = self._handle_document_message(chat_id=chat_id, message=message, caption=caption or text)
+            self._record_command_metric("document", started)
+            self.client.send_message(chat_id, response)
+            return True
+
+        if not text:
+            return False
 
         confirm_response = self._handle_pending_confirmation(chat_id=chat_id, text=text)
         if confirm_response is not None:
@@ -113,6 +124,69 @@ class TelegramGateway:
         self._record_command_metric(cmd.name, started)
         self.client.send_message(chat_id, response)
         return True
+
+    def _handle_document_message(self, chat_id: str, message: dict[str, Any], caption: str = "") -> str:
+        document = message.get("document") or {}
+        file_id = str(document.get("file_id") or "").strip()
+        if not file_id:
+            return "Upload failed: missing Telegram file id"
+
+        original_name = str(document.get("file_name") or "").strip()
+        safe_name = self._sanitize_uploaded_filename(original_name or f"{file_id}.bin")
+        target_rel = self._build_unique_inputs_target(safe_name)
+        target_abs = (Path(self.settings.workspace).resolve() / target_rel).resolve()
+        target_abs.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            file_path = self.client.get_file_path(file_id)
+            payload = self.client.download_file_bytes(file_path)
+            target_abs.write_bytes(payload)
+        except Exception as exc:
+            self._increment_metric("command_errors")
+            self._set_metric_value("last_error", f"telegram file download error: {exc}")
+            return f"Upload failed: {exc}"
+
+        size = int(document.get("file_size") or len(payload))
+        summary = f"Uploaded file: {target_rel} ({size} bytes)"
+        task_text = (caption or "").strip()
+        if not task_text:
+            return (
+                f"{summary}\n"
+                "Send task text (or attach with caption) to start run.\n"
+                f"Example: สกัดข้อมูลสำคัญจากไฟล์ {target_rel}"
+            )
+
+        augmented_task = (
+            f"{task_text}\n\n"
+            "[Uploaded file context]\n"
+            f"- path: {target_rel}\n"
+            f"- original_name: {safe_name}"
+        )
+        run_response = self._submit_or_confirm_task(chat_id=chat_id, task=augmented_task)
+        return f"{summary}\n{run_response}"
+
+    def _sanitize_uploaded_filename(self, name: str) -> str:
+        raw = Path(str(name or "").strip()).name
+        if not raw:
+            return "upload.bin"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._")
+        return safe or "upload.bin"
+
+    def _build_unique_inputs_target(self, file_name: str) -> str:
+        root = Path(self.settings.workspace).resolve()
+        inputs_dir = root / "inputs"
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        candidate = inputs_dir / file_name
+        if not candidate.exists():
+            return str(candidate.relative_to(root)).replace("\\", "/")
+
+        stem = candidate.stem
+        suffix = candidate.suffix
+        for idx in range(1, 1000):
+            cur = inputs_dir / f"{stem}_{idx}{suffix}"
+            if not cur.exists():
+                return str(cur.relative_to(root)).replace("\\", "/")
+        return str((inputs_dir / f"{stem}_{int(time.time())}{suffix}").relative_to(root)).replace("\\", "/")
 
     def _is_allowed_chat(self, chat_id: str) -> bool:
         allow = self.settings.telegram_allowed_chat_ids
