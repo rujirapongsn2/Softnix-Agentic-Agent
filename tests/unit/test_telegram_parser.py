@@ -79,3 +79,10 @@ def test_parse_telegram_skill_delete_command() -> None:
     assert cmd is not None
     assert cmd.name == "skill_delete"
     assert cmd.arg == "web-summary"
+
+
+def test_parse_telegram_context_command() -> None:
+    cmd = parse_telegram_command("/context")
+    assert cmd is not None
+    assert cmd.name == "context"
+    assert cmd.arg == ""

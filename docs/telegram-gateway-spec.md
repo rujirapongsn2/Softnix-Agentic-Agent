@@ -117,6 +117,11 @@ flowchart LR
 - `SOFTNIX_TELEGRAM_WEBHOOK_SECRET` (สำหรับ webhook mode)
 - `SOFTNIX_TELEGRAM_POLL_INTERVAL_SEC` (default เช่น 1.0)
 - `SOFTNIX_TELEGRAM_MAX_TASK_CHARS` (default เช่น 2000)
+- `SOFTNIX_TELEGRAM_RATE_LIMIT_PER_MINUTE` (default 30)
+- `SOFTNIX_TELEGRAM_COOLDOWN_SEC` (default 0.0)
+- `SOFTNIX_TELEGRAM_DEDUP_MAX_IDS` (default 1000)
+- `SOFTNIX_TELEGRAM_AUDIT_ENABLED` (default true)
+- `SOFTNIX_TELEGRAM_AUDIT_PATH` (default `.softnix/telegram/audit.jsonl`)
 
 ## 9. Module Structure (proposed)
 
@@ -153,9 +158,12 @@ Metrics ขั้นต่ำ:
 - reject count (unauthorized chat)
 - telegram api error count
 - command latency (gateway -> final response)
+- duplicate update dropped count
+- rate limit/cooldown rejection count
 
 Logs ขั้นต่ำ:
 - `chat_id`, `command`, `run_id`, status, error summary
+- แนะนำเปิด audit endpoint เพื่อ query mapping (`GET /telegram/audit`)
 
 ## 13. Testing Plan
 

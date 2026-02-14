@@ -1177,6 +1177,16 @@ def telegram_metrics() -> dict:
     return gateway.get_metrics()
 
 
+@app.get("/telegram/audit")
+def telegram_audit(
+    chat_id: str = Query(default=""),
+    run_id: str = Query(default=""),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> dict:
+    gateway = _build_telegram_gateway()
+    return {"items": gateway.get_audit(chat_id=chat_id, run_id=run_id, limit=limit)}
+
+
 @app.get("/system/config")
 def system_config() -> dict:
     admin = _build_memory_admin()
@@ -1235,6 +1245,11 @@ def system_config() -> dict:
         "telegram_natural_mode_enabled": _settings.telegram_natural_mode_enabled,
         "telegram_risky_confirmation_enabled": _settings.telegram_risky_confirmation_enabled,
         "telegram_confirmation_ttl_sec": _settings.telegram_confirmation_ttl_sec,
+        "telegram_rate_limit_per_minute": _settings.telegram_rate_limit_per_minute,
+        "telegram_cooldown_sec": _settings.telegram_cooldown_sec,
+        "telegram_dedup_max_ids": _settings.telegram_dedup_max_ids,
+        "telegram_audit_enabled": _settings.telegram_audit_enabled,
+        "telegram_audit_path": str(_settings.telegram_audit_path),
         "scheduler_enabled": _settings.scheduler_enabled,
         "scheduler_dir": str(_settings.scheduler_dir),
         "scheduler_poll_interval_sec": _settings.scheduler_poll_interval_sec,

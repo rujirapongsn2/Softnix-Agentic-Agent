@@ -275,6 +275,11 @@ def test_telegram_config_from_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED", raising=False)
     monkeypatch.delenv("SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED", raising=False)
     monkeypatch.delenv("SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_RATE_LIMIT_PER_MINUTE", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_COOLDOWN_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_DEDUP_MAX_IDS", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_AUDIT_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_AUDIT_PATH", raising=False)
 
     settings = load_settings()
     assert settings.telegram_enabled is True
@@ -287,6 +292,11 @@ def test_telegram_config_from_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.telegram_natural_mode_enabled is True
     assert settings.telegram_risky_confirmation_enabled is True
     assert settings.telegram_confirmation_ttl_sec == 300
+    assert settings.telegram_rate_limit_per_minute == 30
+    assert settings.telegram_cooldown_sec == 0.0
+    assert settings.telegram_dedup_max_ids == 1000
+    assert settings.telegram_audit_enabled is True
+    assert str(settings.telegram_audit_path) == ".softnix/telegram/audit.jsonl"
 
 
 def test_telegram_natural_mode_and_confirmation_config_from_env(tmp_path: Path, monkeypatch) -> None:
@@ -296,7 +306,12 @@ def test_telegram_natural_mode_and_confirmation_config_from_env(tmp_path: Path, 
         "SOFTNIX_TELEGRAM_ALLOWED_CHAT_IDS=1001\n"
         "SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED=false\n"
         "SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED=false\n"
-        "SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC=120\n",
+        "SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC=120\n"
+        "SOFTNIX_TELEGRAM_RATE_LIMIT_PER_MINUTE=8\n"
+        "SOFTNIX_TELEGRAM_COOLDOWN_SEC=1.5\n"
+        "SOFTNIX_TELEGRAM_DEDUP_MAX_IDS=250\n"
+        "SOFTNIX_TELEGRAM_AUDIT_ENABLED=false\n"
+        "SOFTNIX_TELEGRAM_AUDIT_PATH=.softnix/custom-telegram/audit.jsonl\n",
         encoding="utf-8",
     )
 
@@ -304,11 +319,21 @@ def test_telegram_natural_mode_and_confirmation_config_from_env(tmp_path: Path, 
     monkeypatch.delenv("SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED", raising=False)
     monkeypatch.delenv("SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED", raising=False)
     monkeypatch.delenv("SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_RATE_LIMIT_PER_MINUTE", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_COOLDOWN_SEC", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_DEDUP_MAX_IDS", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_AUDIT_ENABLED", raising=False)
+    monkeypatch.delenv("SOFTNIX_TELEGRAM_AUDIT_PATH", raising=False)
 
     settings = load_settings()
     assert settings.telegram_natural_mode_enabled is False
     assert settings.telegram_risky_confirmation_enabled is False
     assert settings.telegram_confirmation_ttl_sec == 120
+    assert settings.telegram_rate_limit_per_minute == 8
+    assert settings.telegram_cooldown_sec == 1.5
+    assert settings.telegram_dedup_max_ids == 250
+    assert settings.telegram_audit_enabled is False
+    assert str(settings.telegram_audit_path) == ".softnix/custom-telegram/audit.jsonl"
 
 
 def test_scheduler_config_from_env(tmp_path: Path, monkeypatch) -> None:

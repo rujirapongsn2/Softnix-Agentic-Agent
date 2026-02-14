@@ -80,6 +80,11 @@ class Settings:
     telegram_natural_mode_enabled: bool = True
     telegram_risky_confirmation_enabled: bool = True
     telegram_confirmation_ttl_sec: int = 300
+    telegram_rate_limit_per_minute: int = 30
+    telegram_cooldown_sec: float = 0.0
+    telegram_dedup_max_ids: int = 1000
+    telegram_audit_enabled: bool = True
+    telegram_audit_path: Path = Path(".softnix/telegram/audit.jsonl")
     scheduler_enabled: bool = False
     scheduler_dir: Path = Path(".softnix/schedules")
     scheduler_poll_interval_sec: float = 15.0
@@ -263,6 +268,12 @@ def load_settings() -> Settings:
         ).lower()
         in {"1", "true", "yes", "on"},
         telegram_confirmation_ttl_sec=int(os.getenv("SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC", "300")),
+        telegram_rate_limit_per_minute=int(os.getenv("SOFTNIX_TELEGRAM_RATE_LIMIT_PER_MINUTE", "30")),
+        telegram_cooldown_sec=float(os.getenv("SOFTNIX_TELEGRAM_COOLDOWN_SEC", "0.0")),
+        telegram_dedup_max_ids=int(os.getenv("SOFTNIX_TELEGRAM_DEDUP_MAX_IDS", "1000")),
+        telegram_audit_enabled=os.getenv("SOFTNIX_TELEGRAM_AUDIT_ENABLED", "true").lower()
+        in {"1", "true", "yes", "on"},
+        telegram_audit_path=Path(os.getenv("SOFTNIX_TELEGRAM_AUDIT_PATH", ".softnix/telegram/audit.jsonl")),
         scheduler_enabled=os.getenv("SOFTNIX_SCHEDULER_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
         scheduler_dir=Path(os.getenv("SOFTNIX_SCHEDULER_DIR", ".softnix/schedules")),
         scheduler_poll_interval_sec=float(os.getenv("SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC", "15")),

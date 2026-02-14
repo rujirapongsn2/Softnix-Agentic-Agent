@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import fnmatch
+import json
 import re
 import shutil
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,7 @@ from softnix_agentic_agent.skills.factory import normalize_skill_name
 from softnix_agentic_agent.skills.loader import SkillLoader
 from softnix_agentic_agent.storage.filesystem_store import FilesystemStore
 from softnix_agentic_agent.storage.schedule_store import ScheduleStore, compute_next_run_at
+from softnix_agentic_agent.types import RunState, RunStatus
 
 
 class TelegramGateway:
@@ -45,12 +49,25 @@ class TelegramGateway:
         self.skill_build_service = SkillBuildService(settings=settings)
         self._run_chat_map: dict[str, str] = {}
         self._pending_confirmations: dict[str, dict[str, Any]] = {}
+        self._guard_lock = threading.Lock()
+        self._processed_update_ids: deque[int] = deque()
+        self._processed_update_id_set: set[int] = set()
+        self._chat_command_times: dict[str, deque[float]] = {}
+        self._chat_last_command_at: dict[str, float] = {}
+        self._latency_samples_ms: deque[float] = deque()
+        self._audit_path = Path(self.settings.telegram_audit_path)
+        if self.settings.telegram_audit_enabled:
+            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
         self._metrics_lock = threading.Lock()
         self._metrics: dict[str, Any] = {
             "commands_total": 0,
             "commands_by_name": {},
             "command_errors": 0,
             "unauthorized_chats": 0,
+            "duplicate_updates_dropped": 0,
+            "rate_limited_commands": 0,
+            "cooldown_rejections": 0,
+            "audit_events_total": 0,
             "latency_total_ms": 0.0,
             "latency_count": 0,
             "last_error": "",
@@ -71,6 +88,10 @@ class TelegramGateway:
 
     def handle_update(self, update: dict[str, Any]) -> bool:
         started = time.monotonic()
+        update_id = int(update.get("update_id") or 0)
+        if self._is_duplicate_update(update_id):
+            self._increment_metric("duplicate_updates_dropped")
+            return True
         message = update.get("message") or update.get("edited_message") or {}
         chat = message.get("chat") or {}
         chat_id = str(chat.get("id") or "").strip()
@@ -83,12 +104,45 @@ class TelegramGateway:
         if not self._is_allowed_chat(chat_id):
             self._increment_metric("unauthorized_chats")
             self.client.send_message(chat_id, "Unauthorized chat")
+            self._write_audit_event(
+                {
+                    "event": "unauthorized_chat",
+                    "chat_id": chat_id,
+                    "update_id": update_id,
+                }
+            )
+            return True
+
+        limited_message = self._check_rate_limit(
+            chat_id=chat_id,
+            has_command=bool(text or has_document),
+            text=text,
+        )
+        if limited_message is not None:
+            self.client.send_message(chat_id, limited_message)
+            self._write_audit_event(
+                {
+                    "event": "rate_limited",
+                    "chat_id": chat_id,
+                    "update_id": update_id,
+                    "reason": limited_message,
+                }
+            )
             return True
 
         if has_document:
             response = self._handle_document_message(chat_id=chat_id, message=message, caption=caption or text)
             self._record_command_metric("document", started)
             self.client.send_message(chat_id, response)
+            self._write_audit_event(
+                {
+                    "event": "command",
+                    "chat_id": chat_id,
+                    "update_id": update_id,
+                    "command": "document",
+                    "ok": True,
+                }
+            )
             return True
 
         if not text:
@@ -98,6 +152,15 @@ class TelegramGateway:
         if confirm_response is not None:
             self._record_command_metric("confirm", started)
             self.client.send_message(chat_id, confirm_response)
+            self._write_audit_event(
+                {
+                    "event": "command",
+                    "chat_id": chat_id,
+                    "update_id": update_id,
+                    "command": "confirm",
+                    "ok": True,
+                }
+            )
             return True
 
         cmd = parse_telegram_command(text)
@@ -113,16 +176,37 @@ class TelegramGateway:
             else:
                 self._record_command_metric("help", started)
                 self.client.send_message(chat_id, help_text())
+            self._write_audit_event(
+                {
+                    "event": "command",
+                    "chat_id": chat_id,
+                    "update_id": update_id,
+                    "command": "natural" if self.settings.telegram_natural_mode_enabled else "help",
+                    "ok": True,
+                }
+            )
             return True
 
+        ok = True
         try:
             response = self._dispatch_command(chat_id, cmd)
         except Exception as exc:
             self._increment_metric("command_errors")
             self._set_metric_value("last_error", str(exc))
             response = "Internal error while handling command"
+            ok = False
         self._record_command_metric(cmd.name, started)
         self.client.send_message(chat_id, response)
+        self._write_audit_event(
+            {
+                "event": "command",
+                "chat_id": chat_id,
+                "update_id": update_id,
+                "command": cmd.name,
+                "arg_preview": (cmd.arg or "")[:160],
+                "ok": ok,
+            }
+        )
         return True
 
     def _handle_document_message(self, chat_id: str, message: dict[str, Any], caption: str = "") -> str:
@@ -233,6 +317,8 @@ class TelegramGateway:
             return self._skill_delete(cmd.arg)
         if cmd.name == "skills":
             return self._skills()
+        if cmd.name == "context":
+            return self._context(chat_id=chat_id)
         return help_text()
 
     def _submit_or_confirm_task(self, chat_id: str, task: str) -> str:
@@ -241,6 +327,28 @@ class TelegramGateway:
             return "Usage: /run <task>"
         if len(raw) > self.settings.telegram_max_task_chars:
             return f"Task too long (max {self.settings.telegram_max_task_chars} chars)"
+        resolved = self._resolve_implicit_destructive_task(chat_id=chat_id, task=raw)
+        if resolved.get("error"):
+            return str(resolved["error"])
+        if resolved.get("needs_confirmation"):
+            resolved_task = str(resolved.get("task") or raw)
+            target_preview = str(resolved.get("target") or "")
+            source = str(resolved.get("source") or "previous task")
+            strategy = str(resolved.get("strategy") or "context")
+            self._pending_confirmations[chat_id] = {
+                "task": resolved_task,
+                "created_at": time.time(),
+            }
+            preview = resolved_task if len(resolved_task) <= 160 else f"{resolved_task[:157]}..."
+            return (
+                "Resolved implicit delete target from previous task.\n"
+                f"source: {source}\n"
+                f"strategy: {strategy}\n"
+                f"target: {target_preview}\n"
+                f"task: {preview}\n"
+                "Confirm to continue? Reply: yes / no (or /yes /no)"
+            )
+        raw = str(resolved.get("task") or raw)
         if self.settings.telegram_risky_confirmation_enabled and self._looks_risky_task(raw):
             self._pending_confirmations[chat_id] = {
                 "task": raw,
@@ -277,6 +385,14 @@ class TelegramGateway:
         )
         self.thread_registry[state.run_id] = thread
         thread.start()
+        self._write_audit_event(
+            {
+                "event": "run_started",
+                "chat_id": chat_id,
+                "run_id": state.run_id,
+                "task_preview": raw[:200],
+            }
+        )
         return started_text(state.run_id, raw)
 
     def _handle_pending_confirmation(self, chat_id: str, text: str) -> str | None:
@@ -623,6 +739,7 @@ class TelegramGateway:
 
     def notify_run_finished(self, chat_id: str, run_id: str) -> None:
         state = self.store.read_state(run_id)
+        self._update_chat_reference_context(chat_id=chat_id, state=state)
         self.client.send_message(
             chat_id,
             final_run_text(
@@ -635,6 +752,17 @@ class TelegramGateway:
             ),
         )
         self._increment_metric("run_notifications_sent")
+        self._write_audit_event(
+            {
+                "event": "run_finished",
+                "chat_id": chat_id,
+                "run_id": run_id,
+                "status": state.status.value,
+                "stop_reason": state.stop_reason.value if state.stop_reason else "-",
+                "iteration": state.iteration,
+                "max_iters": state.max_iters,
+            }
+        )
         self._send_artifacts(chat_id=chat_id, run_id=run_id)
 
     def _run_and_notify(self, runner: Any, run_id: str, chat_id: str) -> None:
@@ -670,9 +798,189 @@ class TelegramGateway:
                 self.client.send_document(chat_id=chat_id, file_path=target, caption=f"artifact: {rel_path}")
                 sent += 1
                 self._increment_metric("artifact_documents_sent")
+                self._write_audit_event(
+                    {
+                        "event": "artifact_sent",
+                        "chat_id": chat_id,
+                        "run_id": run_id,
+                        "artifact_path": rel_path,
+                    }
+                )
             except Exception as exc:
                 self._increment_metric("command_errors")
                 self._set_metric_value("last_error", f"artifact send error: {exc}")
+
+    def _resolve_implicit_destructive_task(self, chat_id: str, task: str) -> dict[str, Any]:
+        raw = (task or "").strip()
+        if not self._is_delete_intent(raw):
+            return {"task": raw}
+        if self._has_explicit_delete_target(raw):
+            return {"task": raw}
+
+        ctx = self.store.read_reference_context(channel="telegram", owner_id=chat_id)
+        if not ctx:
+            return {
+                "error": "Task ไม่ชัดเจน: ต้องการลบอะไร? โปรดระบุเป้าหมาย เช่น ลบไฟล์ *.txt",
+            }
+        status = str(ctx.get("status", "")).strip().lower()
+        target = str(ctx.get("target_pattern", "")).strip()
+        operation = str(ctx.get("operation", "")).strip().lower()
+        candidate_paths = [str(x).strip() for x in (ctx.get("candidate_paths") or []) if str(x).strip()]
+        if status != "completed" or operation not in {"list", "show", "search"}:
+            return {
+                "error": "Task ไม่ชัดเจน: ไม่พบบริบทล่าสุดที่ใช้ยืนยันเป้าหมายลบ โปรดระบุไฟล์ที่ต้องการลบ",
+            }
+        source_run_id = str(ctx.get("last_run_id", "")).strip()
+        source = f"run {source_run_id}" if source_run_id else "previous completed task"
+        if target:
+            resolved_task = (
+                f"{raw}\n\n"
+                "[Resolved context from previous task]\n"
+                f"- target_pattern: {target}\n"
+                "- scope: workspace only\n"
+                "- safety: delete only files matching target_pattern"
+            )
+            return {
+                "task": resolved_task,
+                "target": target,
+                "source": source,
+                "strategy": "pattern",
+                "needs_confirmation": True,
+            }
+        if candidate_paths:
+            if len(candidate_paths) > 20:
+                return {
+                    "error": "Task ไม่ชัดเจน: พบไฟล์จากบริบทก่อนหน้าจำนวนมากเกินไป โปรดระบุ pattern เช่น *.txt",
+                }
+            listing = "\n".join(f"- {p}" for p in candidate_paths[:20])
+            resolved_task = (
+                f"{raw}\n\n"
+                "[Resolved context from previous task]\n"
+                "- scope: workspace only\n"
+                "- safety: delete only listed files\n"
+                "- target_files:\n"
+                f"{listing}"
+            )
+            return {
+                "task": resolved_task,
+                "target": f"{len(candidate_paths)} files",
+                "source": source,
+                "strategy": "file-list",
+                "needs_confirmation": True,
+            }
+        return {
+            "error": "Task ไม่ชัดเจน: ไม่พบ target จากบริบทล่าสุด โปรดระบุไฟล์หรือ pattern ที่ต้องการลบ",
+        }
+
+    def _is_delete_intent(self, task: str) -> bool:
+        text = (task or "").lower()
+        markers = ("ลบ", "delete", "remove", "rm ")
+        return any(marker in text for marker in markers)
+
+    def _has_explicit_delete_target(self, task: str) -> bool:
+        text = (task or "").strip()
+        if not text:
+            return False
+        if re.search(r"\*\.[A-Za-z0-9]{1,8}", text):
+            return True
+        if re.search(r"\b[a-zA-Z0-9_.-]+\.[A-Za-z0-9]{1,8}\b", text):
+            return True
+        if "/" in text:
+            return True
+        return False
+
+    def _update_chat_reference_context(self, chat_id: str, state: RunState) -> None:
+        if state.status != RunStatus.COMPLETED:
+            return
+        operation = self._infer_task_operation(state.task)
+        target_pattern = self._infer_task_target_pattern(state.task)
+        candidate_paths = self._infer_candidate_paths(state)
+        payload = {
+            "chat_id": chat_id,
+            "last_run_id": state.run_id,
+            "status": state.status.value,
+            "task": state.task,
+            "operation": operation,
+            "target_pattern": target_pattern,
+            "candidate_paths": candidate_paths,
+        }
+        self.store.write_reference_context(channel="telegram", owner_id=chat_id, payload=payload)
+
+    def _infer_task_operation(self, task: str) -> str:
+        text = (task or "").lower()
+        if self._is_delete_intent(text):
+            return "delete"
+        list_markers = ("แสดง", "list", "show", "ค้นหา", "search", "หาไฟล์")
+        if any(marker in text for marker in list_markers):
+            return "list"
+        return "other"
+
+    def _infer_task_target_pattern(self, task: str) -> str:
+        text = str(task or "")
+        wildcard = re.search(r"\*\.[A-Za-z0-9]{1,8}", text)
+        if wildcard:
+            return wildcard.group(0)
+        scoped = re.search(r"(?:นามสกุล|extension|ext|ไฟล์|file|files)[^\n]{0,24}(\.[A-Za-z0-9]{1,8})", text, flags=re.IGNORECASE)
+        if scoped:
+            return f"*{scoped.group(1).lower()}"
+        generic_ext = re.search(r"\.[A-Za-z0-9]{1,8}", text)
+        if generic_ext:
+            return f"*{generic_ext.group(0).lower()}"
+        return ""
+
+    def _infer_candidate_paths(self, state: RunState) -> list[str]:
+        run_id = str(state.run_id or "").strip()
+        if not run_id:
+            return []
+        path_re = re.compile(r"\b(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,8}\b")
+        paths: list[str] = []
+        seen: set[str] = set()
+
+        def _add(path: str) -> None:
+            cur = str(path or "").strip().replace("\\", "/").lstrip("./")
+            if not cur or cur.startswith("/"):
+                return
+            if cur in seen:
+                return
+            seen.add(cur)
+            paths.append(cur)
+
+        for entry in self.store.list_artifact_entries(run_id):
+            rel = str(entry.get("path") or "").strip()
+            if rel:
+                _add(rel)
+        for match in path_re.findall(str(state.last_output or "")):
+            _add(match)
+        pattern = self._infer_task_target_pattern(state.task)
+        if pattern:
+            workspace_root = Path(state.workspace).resolve()
+            for cur in workspace_root.rglob("*"):
+                if not cur.is_file():
+                    continue
+                rel = str(cur.relative_to(workspace_root)).replace("\\", "/")
+                if fnmatch.fnmatch(rel.lower(), pattern.lower()):
+                    _add(rel)
+                if len(paths) >= 50:
+                    break
+        return paths[:50]
+
+    def _context(self, chat_id: str) -> str:
+        ctx = self.store.read_reference_context(channel="telegram", owner_id=chat_id)
+        if not ctx:
+            return "No context yet for this chat"
+        lines = [
+            "Current context:",
+            f"- last_run_id: {ctx.get('last_run_id') or '-'}",
+            f"- status: {ctx.get('status') or '-'}",
+            f"- operation: {ctx.get('operation') or '-'}",
+            f"- target_pattern: {ctx.get('target_pattern') or '-'}",
+        ]
+        candidates = [str(x).strip() for x in (ctx.get("candidate_paths") or []) if str(x).strip()]
+        if candidates:
+            lines.append(f"- candidate_paths: {len(candidates)}")
+            for path in candidates[:5]:
+                lines.append(f"  - {path}")
+        return "\n".join(lines)
 
     def _status(self, run_id: str) -> str:
         rid = (run_id or "").strip()
@@ -738,13 +1046,99 @@ class TelegramGateway:
         items = memory.list_pending()
         return pending_text(rid, items)
 
+    def _is_duplicate_update(self, update_id: int) -> bool:
+        if update_id <= 0:
+            return False
+        max_ids = max(100, int(self.settings.telegram_dedup_max_ids))
+        with self._guard_lock:
+            if update_id in self._processed_update_id_set:
+                return True
+            self._processed_update_id_set.add(update_id)
+            self._processed_update_ids.append(update_id)
+            while len(self._processed_update_ids) > max_ids:
+                old = self._processed_update_ids.popleft()
+                self._processed_update_id_set.discard(old)
+        return False
+
+    def _check_rate_limit(self, chat_id: str, has_command: bool, text: str = "") -> str | None:
+        if not has_command:
+            return None
+        if chat_id in self._pending_confirmations and (
+            self._is_confirm_text(text) or self._is_reject_text(text)
+        ):
+            return None
+        now = time.time()
+        per_min = max(1, int(self.settings.telegram_rate_limit_per_minute))
+        cooldown = max(0.0, float(self.settings.telegram_cooldown_sec))
+        with self._guard_lock:
+            last = float(self._chat_last_command_at.get(chat_id, 0.0))
+            if cooldown > 0.0 and last > 0.0 and (now - last) < cooldown:
+                self._increment_metric("rate_limited_commands")
+                self._increment_metric("cooldown_rejections")
+                wait = max(0.0, cooldown - (now - last))
+                return f"Please wait {wait:.1f}s before sending next command"
+
+            q = self._chat_command_times.get(chat_id)
+            if q is None:
+                q = deque()
+                self._chat_command_times[chat_id] = q
+            boundary = now - 60.0
+            while q and q[0] < boundary:
+                q.popleft()
+            if len(q) >= per_min:
+                self._increment_metric("rate_limited_commands")
+                return f"Rate limit exceeded ({per_min}/min). Please retry shortly."
+            q.append(now)
+            self._chat_last_command_at[chat_id] = now
+        return None
+
+    def _write_audit_event(self, payload: dict[str, Any]) -> None:
+        if not self.settings.telegram_audit_enabled:
+            return
+        row = {"ts": time.time(), **(payload or {})}
+        try:
+            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._audit_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            self._increment_metric("audit_events_total")
+        except Exception as exc:
+            self._increment_metric("command_errors")
+            self._set_metric_value("last_error", f"telegram audit write error: {exc}")
+
+    def get_audit(self, chat_id: str = "", run_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        if not self.settings.telegram_audit_enabled or not self._audit_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in self._audit_path.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                row = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if chat_id and str(row.get("chat_id", "")) != str(chat_id):
+                continue
+            if run_id and str(row.get("run_id", "")) != str(run_id):
+                continue
+            rows.append(row)
+        lim = max(1, int(limit))
+        return rows[-lim:]
+
     def get_metrics(self) -> dict[str, Any]:
         with self._metrics_lock:
             metrics = dict(self._metrics)
             avg = 0.0
             if metrics["latency_count"] > 0:
                 avg = metrics["latency_total_ms"] / metrics["latency_count"]
+            p95 = 0.0
+            samples = list(self._latency_samples_ms)
+            if samples:
+                ordered = sorted(samples)
+                idx = int(round(0.95 * (len(ordered) - 1)))
+                p95 = float(ordered[max(0, min(idx, len(ordered) - 1))])
             metrics["avg_latency_ms"] = round(avg, 2)
+            metrics["p95_latency_ms"] = round(p95, 2)
             return metrics
 
     def _increment_metric(self, key: str, amount: int = 1) -> None:
@@ -764,3 +1158,6 @@ class TelegramGateway:
             self._metrics["commands_by_name"] = per
             self._metrics["latency_total_ms"] = float(self._metrics.get("latency_total_ms", 0.0)) + elapsed_ms
             self._metrics["latency_count"] = int(self._metrics.get("latency_count", 0)) + 1
+            self._latency_samples_ms.append(elapsed_ms)
+            while len(self._latency_samples_ms) > 500:
+                self._latency_samples_ms.popleft()

@@ -396,6 +396,10 @@ def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
         def get_metrics(self):  # type: ignore[no-untyped-def]
             return {"commands_total": 3, "avg_latency_ms": 12.3}
 
+        def get_audit(self, chat_id="", run_id="", limit=100):  # type: ignore[no-untyped-def]
+            _ = (chat_id, run_id, limit)
+            return [{"event": "command", "chat_id": "1001", "run_id": "r1"}]
+
     settings = Settings(
         runs_dir=tmp_path / "runs",
         workspace=tmp_path,
@@ -436,6 +440,9 @@ def test_telegram_webhook_and_poll(monkeypatch, tmp_path: Path) -> None:
     metrics = client.get("/telegram/metrics")
     assert metrics.status_code == 200
     assert metrics.json()["commands_total"] == 3
+    audit = client.get("/telegram/audit?chat_id=1001&limit=10")
+    assert audit.status_code == 200
+    assert len(audit.json()["items"]) == 1
 
 
 def test_memory_admin_key_control_plane_rotate_revoke_and_audit(monkeypatch, tmp_path: Path) -> None:

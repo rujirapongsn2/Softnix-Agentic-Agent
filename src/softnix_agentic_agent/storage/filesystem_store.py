@@ -13,6 +13,8 @@ class FilesystemStore:
     def __init__(self, runs_dir: Path) -> None:
         self.runs_dir = runs_dir
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.context_refs_dir = self.runs_dir.parent / "context_refs"
+        self.context_refs_dir.mkdir(parents=True, exist_ok=True)
         self.experience_dir = self.runs_dir.parent / "experience"
         self.experience_dir.mkdir(parents=True, exist_ok=True)
         self.experience_file = self.experience_dir / "success_cases.jsonl"
@@ -137,6 +139,27 @@ class FilesystemStore:
         line = {"ts": utc_now_iso(), **payload}
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+    def write_reference_context(self, channel: str, owner_id: str, payload: dict[str, Any]) -> None:
+        p = self._context_ref_path(channel=channel, owner_id=owner_id)
+        row = {"ts": utc_now_iso(), **(payload or {})}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w", encoding="utf-8") as f:
+            json.dump(row, f, indent=2, ensure_ascii=False)
+
+    def read_reference_context(self, channel: str, owner_id: str) -> dict[str, Any]:
+        p = self._context_ref_path(channel=channel, owner_id=owner_id)
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _context_ref_path(self, channel: str, owner_id: str) -> Path:
+        c = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(channel or "").strip()) or "default"
+        o = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(owner_id or "").strip()) or "default"
+        return self.context_refs_dir / f"{c}__{o}.json"
 
     def read_memory_audit(self, run_id: str) -> list[dict[str, Any]]:
         p = self.run_dir(run_id) / "memory_audit.jsonl"

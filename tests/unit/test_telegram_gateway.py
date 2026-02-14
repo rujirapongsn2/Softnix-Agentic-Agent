@@ -396,6 +396,177 @@ def test_gateway_risky_task_requires_confirmation_then_yes_runs(tmp_path: Path, 
     assert any("Started run: tg-run-1" in text for _, text in fake_client.sent_messages)
 
 
+def test_gateway_implicit_delete_uses_context_and_requires_confirmation(tmp_path: Path, monkeypatch) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=False,
+    )
+    fake_client = FakeTelegramClient()
+    threads: dict[str, threading.Thread] = {}
+    fake_runner = FakeRunner(store=store, workspace=tmp_path)
+    monkeypatch.setattr(
+        "softnix_agentic_agent.integrations.telegram_gateway.build_runner",
+        lambda settings, provider_name, model=None: fake_runner,
+    )
+
+    store.write_reference_context(
+        channel="telegram",
+        owner_id="8388377631",
+        payload={
+            "last_run_id": "r-prev",
+            "status": "completed",
+            "task": "แสดงไฟล์นามสกุล .txt",
+            "operation": "list",
+            "target_pattern": "*.txt",
+        },
+    )
+
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry=threads, client=fake_client)
+    ok_prompt = gateway.handle_update(
+        {
+            "update_id": 300,
+            "message": {"chat": {"id": 8388377631}, "text": "ช่วยลบให้หน่อย"},
+        }
+    )
+    assert ok_prompt is True
+    assert "Resolved implicit delete target from previous task" in fake_client.sent_messages[-1][1]
+    assert "*.txt" in fake_client.sent_messages[-1][1]
+    assert "tg-run-1" not in threads
+
+    ok_yes = gateway.handle_update(
+        {
+            "update_id": 301,
+            "message": {"chat": {"id": 8388377631}, "text": "yes"},
+        }
+    )
+    assert ok_yes is True
+    assert "tg-run-1" in threads
+    threads["tg-run-1"].join(timeout=2)
+    assert any("Started run: tg-run-1" in text for _, text in fake_client.sent_messages)
+
+
+def test_gateway_implicit_delete_without_context_returns_clarification(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=False,
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok = gateway.handle_update(
+        {
+            "update_id": 302,
+            "message": {"chat": {"id": 8388377631}, "text": "ช่วยลบให้หน่อย"},
+        }
+    )
+    assert ok is True
+    assert "Task ไม่ชัดเจน" in fake_client.sent_messages[-1][1]
+
+
+def test_gateway_implicit_delete_uses_context_candidate_files(tmp_path: Path, monkeypatch) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=False,
+    )
+    fake_client = FakeTelegramClient()
+    threads: dict[str, threading.Thread] = {}
+    fake_runner = FakeRunner(store=store, workspace=tmp_path)
+    monkeypatch.setattr(
+        "softnix_agentic_agent.integrations.telegram_gateway.build_runner",
+        lambda settings, provider_name, model=None: fake_runner,
+    )
+
+    store.write_reference_context(
+        channel="telegram",
+        owner_id="8388377631",
+        payload={
+            "last_run_id": "r-prev",
+            "status": "completed",
+            "task": "แสดงไฟล์ทั้งหมดใน inputs",
+            "operation": "list",
+            "target_pattern": "",
+            "candidate_paths": ["inputs/a.txt", "inputs/b.txt"],
+        },
+    )
+
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry=threads, client=fake_client)
+    ok_prompt = gateway.handle_update(
+        {
+            "update_id": 303,
+            "message": {"chat": {"id": 8388377631}, "text": "ช่วยลบให้หน่อย"},
+        }
+    )
+    assert ok_prompt is True
+    msg = fake_client.sent_messages[-1][1]
+    assert "strategy: file-list" in msg
+    assert "target: 2 files" in msg
+
+
+def test_gateway_context_command_shows_reference_context(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+    )
+    fake_client = FakeTelegramClient()
+    store.write_reference_context(
+        channel="telegram",
+        owner_id="8388377631",
+        payload={
+            "last_run_id": "r1",
+            "status": "completed",
+            "operation": "list",
+            "target_pattern": "*.txt",
+            "candidate_paths": ["inputs/a.txt"],
+        },
+    )
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+    ok = gateway.handle_update(
+        {
+            "update_id": 304,
+            "message": {"chat": {"id": 8388377631}, "text": "/context"},
+        }
+    )
+    assert ok is True
+    text = fake_client.sent_messages[-1][1]
+    assert "Current context:" in text
+    assert "last_run_id: r1" in text
+    assert "target_pattern: *.txt" in text
+
+
 def test_gateway_skill_build_command_and_status(tmp_path: Path) -> None:
     store = FilesystemStore(tmp_path / "runs")
     settings = Settings(
@@ -716,3 +887,85 @@ def test_gateway_document_upload_without_caption_only_confirms_upload(tmp_path: 
     assert ok is True
     assert (tmp_path / "inputs" / "invoice.pdf").exists()
     assert "Send task text" in fake_client.sent_messages[-1][1]
+
+
+def test_gateway_deduplicates_same_update_id(tmp_path: Path, monkeypatch) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        provider="claude",
+        model="m",
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_natural_mode_enabled=True,
+        telegram_risky_confirmation_enabled=False,
+        telegram_cooldown_sec=0.0,
+        telegram_rate_limit_per_minute=100,
+    )
+    fake_client = FakeTelegramClient()
+    threads: dict[str, threading.Thread] = {}
+    fake_runner = FakeRunner(store=store, workspace=tmp_path)
+    monkeypatch.setattr(
+        "softnix_agentic_agent.integrations.telegram_gateway.build_runner",
+        lambda settings, provider_name, model=None: fake_runner,
+    )
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry=threads, client=fake_client)
+
+    payload = {"update_id": 901, "message": {"chat": {"id": 8388377631}, "text": "/run hello"}}
+    ok1 = gateway.handle_update(payload)
+    ok2 = gateway.handle_update(payload)
+    assert ok1 is True
+    assert ok2 is True
+    assert len([x for x in fake_client.sent_messages if "Started run: tg-run-1" in x[1]]) == 1
+    metrics = gateway.get_metrics()
+    assert int(metrics.get("duplicate_updates_dropped", 0)) >= 1
+
+
+def test_gateway_rate_limit_blocks_excess_commands(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_rate_limit_per_minute=1,
+        telegram_cooldown_sec=0.0,
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok1 = gateway.handle_update({"update_id": 902, "message": {"chat": {"id": 8388377631}, "text": "/help"}})
+    ok2 = gateway.handle_update({"update_id": 903, "message": {"chat": {"id": 8388377631}, "text": "/help"}})
+    assert ok1 is True
+    assert ok2 is True
+    assert "Rate limit exceeded" in fake_client.sent_messages[-1][1]
+    metrics = gateway.get_metrics()
+    assert int(metrics.get("rate_limited_commands", 0)) >= 1
+
+
+def test_gateway_audit_log_records_events(tmp_path: Path) -> None:
+    store = FilesystemStore(tmp_path / "runs")
+    settings = Settings(
+        workspace=tmp_path,
+        runs_dir=tmp_path / "runs",
+        skills_dir=tmp_path,
+        telegram_enabled=True,
+        telegram_bot_token="token-x",
+        telegram_allowed_chat_ids=["8388377631"],
+        telegram_audit_enabled=True,
+        telegram_audit_path=tmp_path / ".softnix/telegram/audit.jsonl",
+        telegram_cooldown_sec=0.0,
+    )
+    fake_client = FakeTelegramClient()
+    gateway = TelegramGateway(settings=settings, store=store, thread_registry={}, client=fake_client)
+
+    ok = gateway.handle_update({"update_id": 904, "message": {"chat": {"id": 8388377631}, "text": "/help"}})
+    assert ok is True
+    rows = gateway.get_audit(chat_id="8388377631", limit=20)
+    assert rows
+    assert any(str(row.get("event", "")) == "command" for row in rows)

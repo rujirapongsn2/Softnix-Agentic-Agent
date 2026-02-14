@@ -181,6 +181,11 @@ pip install -e '.[dev]'
 - `SOFTNIX_TELEGRAM_NATURAL_MODE_ENABLED` เปิดโหมดใช้งานแบบธรรมชาติ (ข้อความปกติ = task)
 - `SOFTNIX_TELEGRAM_RISKY_CONFIRMATION_ENABLED` เปิดการขอยืนยันก่อนรันงานเสี่ยง
 - `SOFTNIX_TELEGRAM_CONFIRMATION_TTL_SEC` อายุของคำขอยืนยันงานเสี่ยง (วินาที)
+- `SOFTNIX_TELEGRAM_RATE_LIMIT_PER_MINUTE` จำกัดจำนวนคำสั่งต่อ chat ต่อ 1 นาที
+- `SOFTNIX_TELEGRAM_COOLDOWN_SEC` ช่วงพักขั้นต่ำก่อนรับคำสั่งถัดไปจาก chat เดิม
+- `SOFTNIX_TELEGRAM_DEDUP_MAX_IDS` ขนาดหน้าต่างกัน update ซ้ำ (idempotency)
+- `SOFTNIX_TELEGRAM_AUDIT_ENABLED` เปิด/ปิดการบันทึก audit ของ command/run mapping
+- `SOFTNIX_TELEGRAM_AUDIT_PATH` path ของไฟล์ audit (`jsonl`)
 - `SOFTNIX_SCHEDULER_ENABLED` เปิด/ปิด scheduler worker สำหรับงานตั้งเวลา
 - `SOFTNIX_SCHEDULER_DIR` path เก็บ schedule definitions/history
 - `SOFTNIX_SCHEDULER_POLL_INTERVAL_SEC` ความถี่ที่ worker ตรวจงานที่ถึงเวลา
@@ -301,6 +306,7 @@ softnix api serve --host 127.0.0.1 --port 8787
 - `POST /telegram/webhook` รับ Telegram webhook update (public endpoint, แนะนำให้เปิด secret verify)
 - `POST /telegram/poll` ดึง updates แบบ manual 1 รอบ (สำหรับ dev/polling)
 - `GET /telegram/metrics` อ่าน command/error/latency metrics ของ Telegram gateway
+- `GET /telegram/audit` อ่าน audit events (`chat_id`, `run_id`, `event`) สำหรับ debug/วัดผลจริง
 - `POST /schedules` สร้างงานตั้งเวลา (one-time/cron)
 - `POST /schedules/parse` แปลงข้อความธรรมชาติเป็น schedule payload
 - `POST /schedules/from-text` สร้าง schedule จากข้อความธรรมชาติโดยตรง
@@ -524,6 +530,7 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - `/skill_builds`
 - `/skill_delete <skill_name>` (ลบ skill ออกจาก skillpacks)
 - `/skills` (แสดงรายการ skills ที่ระบบโหลดใช้งานได้)
+- `/context` (ดูบริบทล่าสุดที่ระบบจะใช้อ้างอิงกับคำสั่ง follow-up)
 - `/schedule ทุกวัน 09:00 ช่วยสรุปข้อมูลจาก www.softnix.ai และข่าว AI`
 - `/schedules`
 - `/schedule_runs <schedule_id>`
@@ -540,6 +547,10 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 - หากเป็นงานเสี่ยง (เช่น ลบไฟล์, ส่งอีเมล, ติดตั้ง package) bot จะขอ confirm ก่อนรัน
   - ตอบ `yes` หรือ `/yes` เพื่อยืนยัน
   - ตอบ `no` หรือ `/no` เพื่อยกเลิก
+- กรณีคำสั่งกำกวมเชิงทำลาย เช่น `ช่วยลบให้หน่อย`:
+  - ระบบจะพยายาม resolve จาก context ของ run ล่าสุด (เช่น `target_pattern` หรือรายการไฟล์ที่เกี่ยวข้อง)
+  - จะแสดง source/strategy/target ที่ resolve ได้ก่อน และต้องยืนยัน `yes` ทุกครั้ง
+  - ใช้ `/context` เพื่อตรวจว่าระบบกำลังถือบริบทอะไรอยู่
 
 พฤติกรรมหลัง `/skill_build`:
 - bot จะตอบ `Skill build started: <job_id>` ทันที
@@ -553,6 +564,20 @@ curl -sS "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 
 หมายเหตุสำคัญ:
 - ถ้าต้องการให้ schedule ทำงานอัตโนมัติ ต้องเปิด `SOFTNIX_SCHEDULER_ENABLED=true` และ restart backend
+
+วัดผลจริง (Telegram hardening):
+- ตรวจ metrics:
+```bash
+curl -sS http://127.0.0.1:8787/telegram/metrics
+```
+- ตรวจ audit ล่าสุด:
+```bash
+curl -sS "http://127.0.0.1:8787/telegram/audit?chat_id=<CHAT_ID>&limit=20"
+```
+- สิ่งที่ควรเห็น:
+  - `duplicate_updates_dropped` > 0 เมื่อ webhook ส่ง update ซ้ำ
+  - `rate_limited_commands` > 0 เมื่อยิงคำสั่งถี่เกิน policy
+  - audit มี `run_started` / `run_finished` พร้อม `chat_id <-> run_id` mapping
 
 ### Quick E2E (Telegram Schedule)
 

@@ -62,6 +62,14 @@
   - รองรับ natural mode (ไม่ต้องพิมพ์ `/run` ทุกครั้ง)
   - รองรับงานตั้งเวลา (`/schedule`, `/schedules`, `/schedule_runs`, `/schedule_disable`, `/schedule_delete`)
   - รองรับ skill build jobs (`/skill_build`, `/skill_status`, `/skill_builds`) และส่งผลจบงานอัตโนมัติ
+- สถานะอัปเดต (Phase 2 - ข้อ 4-6 เสร็จแล้ว):
+  - context-aware follow-up สำหรับคำสั่งกำกวมเชิงทำลาย (เช่น `ช่วยลบให้หน่อย`) พร้อม confirmation ก่อนรัน
+  - resolve target จากทั้ง pattern และ candidate file list ของ run ล่าสุด เพื่อให้ฉลาดขึ้น
+  - เพิ่ม `/context` ให้ผู้ใช้ตรวจสอบบริบทที่ระบบจะใช้อ้างอิงได้ทันที (UX ชัดขึ้น)
+- สถานะอัปเดต (Phase 3 - ข้อ 7-8 เสร็จแล้ว):
+  - hardening: เพิ่ม idempotency dedup สำหรับ `update_id` ซ้ำ + rate limit/cooldown ต่อ chat
+  - วัดผลจริง: เพิ่ม Telegram metrics (`p95 latency`, duplicate/rate-limit counters) และ audit log query (`/telegram/audit`)
+  - traceability: บันทึก mapping `chat_id <-> run_id` ผ่าน audit events (`run_started`, `run_finished`, `artifact_sent`)
 - งานหลัก (Phase 2: Hardening):
   - access control ต่อ chat/user + anti-abuse (rate limit, cooldown, retry)
   - idempotency และ dedup สำหรับ message update ซ้ำ
