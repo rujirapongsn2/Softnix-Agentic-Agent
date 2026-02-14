@@ -38,80 +38,51 @@ CLI-first agent framework ที่ทำงานตาม flow:
 
 ```mermaid
 flowchart LR
-    USER["User"] --> CLI["CLI (softnix run/resume)"]
-    USER --> WEB["Web UI (React/Vite)"]
-    USER --> TG["Telegram Bot"]
+    U["User"] --> WEB["Web UI"]
+    U --> TG["Telegram"]
+    U --> CLI["CLI"]
 
-    CLI --> API["FastAPI Facade"]
-    WEB -->|REST + SSE| API
-    TG -->|Webhook| API
+    WEB --> API["FastAPI Backend"]
+    TG --> API
+    CLI --> API
 
-    API --> RUNAPI["Run API (/runs/*)"]
-    API --> SKBUILDAPI["Skill Build API (/skills/build*)"]
-    API --> FILEAPI["File API (/files/upload)"]
-    API --> SCHAPI["Schedule API (/schedules/*)"]
-    API --> TGIN["Telegram API (/telegram/*)"]
-    API --> SCHWORKER["Scheduler Worker (background thread)"]
-    API --> RETWORKER["Run Retention Worker (background thread)"]
-    API --> ADMIN["Memory Admin Control Plane"]
+    API --> RUN["Run API + Stream"]
+    API --> SCH["Scheduler"]
+    API --> TGGW["Telegram Gateway"]
+    API --> SKB["Skill Build API"]
 
-    RUNAPI --> LOOP["Agent Loop"]
-    SCHWORKER --> SSTORE["Schedule Store (.softnix/schedules)"]
-    SCHWORKER -->|dispatch due schedule| LOOP
-    SCHWORKER -->|notify when done| TGW["Telegram Gateway"]
+    RUN --> LOOP["Agent Loop"]
+    LOOP --> PLAN["Planner (LLM)"]
+    LOOP --> SKSEL["Skill Selector"]
+    SKSEL --> SKILL["Skillpacks (SKILL.md + scripts + .secret)"]
+    LOOP --> EXEC["Safe Executor"]
+    EXEC --> RT{"Runtime"}
+    RT --> HOST["host"]
+    RT --> CTR["container (per_action/per_run)"]
+    EXEC --> WS["Workspace files"]
 
-    SCHAPI --> SSTORE
-    TGIN --> TGW
-    TGW -->|/run| LOOP
-    TGW -->|/skill_build,/skill_status,/skill_builds| SKBUILDAPI
-    TGW -->|/schedule,/schedules,/schedule_runs| SSTORE
-    TGW --> TGCLIENT["Telegram Client"]
-    TGCLIENT --> TG
+    LOOP --> MEM["Core Memory"]
+    MEM --> MFILES["memory/PROFILE.md + SESSION.md"]
+    MEM --> MPOL["Global POLICY (admin)"]
 
-    LOOP --> PLAN["Planner"]
-    PLAN --> PROVIDERS["LLM Providers (OpenAI/Claude/Custom)"]
-    LOOP --> EXEC["Executor (safe actions)"]
-    LOOP --> SKSEL["Skill Selector (task -> relevant skills)"]
-    SKSEL --> SKILLS["Skill Loader/Parser (SKILL.md)"]
-    LOOP --> MEMORY["Core Memory Service"]
-    LOOP --> STORE["Filesystem Store"]
-    SKBUILDAPI --> SKBUILD["Skill Build Service"]
-    SKBUILD --> SKBUILDSTORE[".softnix/skill-builds/<job_id>/"]
-    SKBUILD --> SKILLS
+    LOOP --> STORE["Run Store"]
+    STORE --> RUNFILES[".softnix/runs/<run_id> (state/iterations/events/artifacts)"]
 
-    MEMORY --> PROFILE["workspace/memory/PROFILE.md"]
-    MEMORY --> SESSION["workspace/memory/SESSION.md"]
-    MEMORY --> POLICY[".softnix/system/POLICY.md"]
-    ADMIN --> POLICY
-    ADMIN --> ADMINKEYS[".softnix/system/MEMORY_ADMIN_KEYS.json"]
-    ADMIN --> AUDIT[".softnix/system/MEMORY_ADMIN_AUDIT.jsonl"]
-
-    EXEC --> RUNTIME{"Execution Runtime"}
-    RUNTIME --> HOST["Host"]
-    RUNTIME --> CONTAINER["Container (per_action/per_run)"]
-    CONTAINER --> CACHE[".softnix/container-cache (pip cache)"]
-    EXEC --> WORKSPACE["Workspace Files"]
-
-    STORE --> RUNS[".softnix/runs/<run_id>/"]
-    RUNS --> STATE["state.json"]
-    RUNS --> ITERS["iterations.jsonl"]
-    RUNS --> EVENTS["events.log"]
-    RUNS --> ARTIFACTS["artifacts/"]
-    RETWORKER --> RUNS
-
-    TGW -->|run status + artifacts| TG
-    WEB -->|Upload file| FILEAPI
-    WEB -->|Artifacts download| API
+    SCH --> SFILES[".softnix/schedules"]
+    SCH --> LOOP
+    TGGW --> LOOP
+    TGGW --> TG
+    SKB --> SKILL
 ```
 
 ลำดับการทำงานหลัก:
-1. รับ `task` จาก CLI หรือ Web UI
-2. Agent Core เริ่ม `Agent Loop` และเรียก `Planner` เพื่อขอแผนจาก LLM Provider
-3. `Skill Selector` คัดเฉพาะ skill ที่เกี่ยวข้องจาก task แล้วส่งให้ `Skill Loader/Parser` สร้าง context/contract
-4. `Safe Action Executor` ทำ action ที่อนุญาตและเขียนไฟล์ใน workspace
-5. `FilesystemStore` บันทึก state/iterations/events/artifacts ต่อเนื่องทุก iteration
-6. Core Memory update/resolve บริบทจาก `memory/PROFILE.md`/`memory/SESSION.md` แล้ว inject เข้า planner prompt
-7. API/Web UI อ่านสถานะล่าสุดและ timeline จาก run storage แบบ near real-time
+1. ผู้ใช้ส่งงานผ่าน `Web UI` / `Telegram` / `CLI`
+2. `FastAPI` สร้าง run แล้วเข้า `Agent Loop`
+3. `Planner` วางแผน + `Skill Selector` เลือกเฉพาะ skill ที่เกี่ยวข้อง
+4. `Safe Executor` รันงานบน `host` หรือ `container` และเขียนผลใน workspace
+5. `Core Memory` เติมบริบทจาก `PROFILE.md` / `SESSION.md` (+ policy แบบ admin)
+6. `Run Store` บันทึก `state / iterations / events / artifacts` ให้ UI/Telegram อ่านผลแบบต่อเนื่อง
+7. `Scheduler` และ `Telegram Gateway` สามารถสั่ง run อัตโนมัติและส่งผลกลับผู้ใช้
 
 ## ติดตั้ง
 

@@ -1,6 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bot, Check, Download, LoaderCircle, PauseCircle, PlayCircle, SendHorizontal, X } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Check,
+  Download,
+  Flag,
+  GitBranch,
+  ListTodo,
+  LoaderCircle,
+  PauseCircle,
+  PlayCircle,
+  SendHorizontal,
+  ShieldCheck,
+  Wrench,
+  X
+} from "lucide-react";
 
 import { MarkdownStream } from "@/components/ai-elements/markdown-stream";
 import { MessageBubble } from "@/components/ai-elements/message-bubble";
@@ -20,13 +37,31 @@ type TimelineItem =
   | { id: string; kind: "iteration"; item: Record<string, unknown> }
   | { id: string; kind: "state"; state: RunState };
 
-type RunDiagnostics = {
-  runtimeProfile?: string;
-  runtimeImage?: string;
-  noProgressSignature?: string;
-  noProgressActions?: string;
-  lastIteration?: number;
-  lastIterationDone?: boolean;
+type RunPhaseKey = "plan" | "execute" | "validate" | "replan" | "final";
+type RunPhaseState = "pending" | "active" | "success" | "failed";
+type RunPhase = {
+  key: RunPhaseKey;
+  label: string;
+  state: RunPhaseState;
+  detail: string;
+  at?: string;
+};
+
+type PhaseMilestone = {
+  id: string;
+  phase: RunPhaseKey;
+  text: string;
+  at?: string;
+};
+
+type IterationLane = {
+  id: string;
+  iteration: number;
+  done: boolean;
+  at?: string;
+  actionCount: number;
+  failedCount: number;
+  summary: string;
 };
 
 type CreateRunDefaults = {
@@ -130,30 +165,6 @@ function runOutcome(run: RunState): { label: string; variant: "default" | "muted
   return { label: run.status, variant: "muted" };
 }
 
-function extractDiagnostics(items: TimelineItem[]): RunDiagnostics {
-  const diagnostics: RunDiagnostics = {};
-  for (const item of items) {
-    if (item.kind !== "event") continue;
-    const runtime = item.text.match(/^Container runtime selected: profile=([^,]+), image=(.+)$/);
-    if (runtime) {
-      diagnostics.runtimeProfile = runtime[1];
-      diagnostics.runtimeImage = runtime[2];
-      continue;
-    }
-    const noProgress = item.text.match(/^Run failed: no progress detected \(\d+ repeats, sig=([a-f0-9]+), actions=(.+)\)$/);
-    if (noProgress) {
-      diagnostics.noProgressSignature = noProgress[1];
-      diagnostics.noProgressActions = noProgress[2];
-      continue;
-    }
-    const iter = item.text.match(/^Iteration (\d+) finished \((done|continue)\)$/);
-    if (iter) {
-      diagnostics.lastIteration = Number(iter[1]);
-      diagnostics.lastIterationDone = iter[2] === "done";
-    }
-  }
-  return diagnostics;
-}
 
 function finalSummary(run: RunState | null): { title: string; detail: string; tone: "ok" | "warn" | "neutral" } | null {
   if (!run || run.status === "running") return null;
@@ -205,6 +216,153 @@ function finalSummary(run: RunState | null): { title: string; detail: string; to
   };
 }
 
+function runPhaseTimeline(items: TimelineItem[], run: RunState | null): RunPhase[] {
+  const steps: RunPhase[] = [
+    { key: "plan", label: "Plan", state: "pending", detail: "Waiting for plan generation" },
+    { key: "execute", label: "Execute", state: "pending", detail: "Waiting for action execution" },
+    { key: "validate", label: "Validate", state: "pending", detail: "Waiting for objective validation" },
+    { key: "replan", label: "Replan", state: "pending", detail: "No replan triggered yet" },
+    { key: "final", label: "Final", state: "pending", detail: "Run in progress" }
+  ];
+
+  const touch = (key: RunPhaseKey, detail: string, at?: string) => {
+    const idx = steps.findIndex((x) => x.key === key);
+    if (idx < 0) return;
+    if (steps[idx].state === "pending") steps[idx].state = "active";
+    steps[idx].detail = detail;
+    if (at) steps[idx].at = at;
+  };
+
+  for (const item of items) {
+    if (item.kind !== "event") continue;
+    const msg = item.text.toLowerCase();
+    if (msg.includes("skills selected iteration") || msg.includes("plan gate triggered")) {
+      touch("plan", item.text, item.at);
+    }
+    if (msg.includes("metrics iteration") || msg.includes("artifact saved")) {
+      touch("execute", item.text, item.at);
+    }
+    if (msg.includes("validation passed") || msg.includes("validation failed")) {
+      touch("validate", item.text, item.at);
+    }
+    if (msg.includes("replan") || msg.includes("repair_loop_required") || msg.includes("preparatory_only") || msg.includes("low_effective_pattern")) {
+      touch("replan", item.text, item.at);
+    }
+    if (msg.includes("stopped:") || msg.includes("run failed") || msg.includes("run canceled")) {
+      touch("final", item.text, item.at);
+    }
+  }
+
+  if (run) {
+    if (run.iteration > 0 && steps[0].state === "pending") {
+      steps[0].state = "active";
+      steps[0].detail = `Planning started by iteration ${run.iteration}`;
+    }
+    if (run.iteration > 0 && steps[1].state === "pending") {
+      steps[1].state = "active";
+      steps[1].detail = "Actions executed during run";
+    }
+
+    if (run.status === "completed") {
+      steps.forEach((step) => {
+        if (step.state === "pending") step.state = "success";
+        if (step.state === "active") step.state = "success";
+      });
+      steps[4].detail = `Completed in ${run.iteration} iteration(s)`;
+    } else if (run.status === "failed") {
+      steps[4].state = "failed";
+      steps[4].detail = `Failed: ${renderStopReason(run.stop_reason)}`;
+      const stop = run.stop_reason ?? "";
+      if (stop === "error" || stop === "no_progress") {
+        if (steps[1].state !== "failed") steps[1].state = "failed";
+      }
+      if (stop === "max_iters") {
+        if (steps[2].state !== "failed") steps[2].state = "failed";
+      }
+    } else if (run.status === "canceled") {
+      steps[4].state = "failed";
+      steps[4].detail = "Canceled by user";
+    } else {
+      steps[4].state = "active";
+      steps[4].detail = `Running iteration ${run.iteration}/${run.max_iters}`;
+    }
+  }
+
+  return steps;
+}
+
+function phaseVisualState(phase: RunPhase): { dot: string; text: string } {
+  if (phase.state === "success") return { dot: "bg-emerald-500", text: "text-emerald-700" };
+  if (phase.state === "failed") return { dot: "bg-rose-500", text: "text-rose-700" };
+  if (phase.state === "active") return { dot: "bg-sky-500", text: "text-sky-700" };
+  return { dot: "bg-slate-300", text: "text-slate-500" };
+}
+
+function phaseIcon(key: RunPhaseKey) {
+  if (key === "plan") return ListTodo;
+  if (key === "execute") return Wrench;
+  if (key === "validate") return ShieldCheck;
+  if (key === "replan") return GitBranch;
+  return Flag;
+}
+
+function phaseFromEventText(text: string): RunPhaseKey | null {
+  const msg = (text || "").toLowerCase();
+  if (msg.includes("skills selected iteration") || msg.includes("plan gate triggered")) return "plan";
+  if (msg.includes("metrics iteration") || msg.includes("artifact saved")) return "execute";
+  if (msg.includes("validation passed") || msg.includes("validation failed")) return "validate";
+  if (msg.includes("replan") || msg.includes("repair_loop_required") || msg.includes("low_effective_pattern")) return "replan";
+  if (msg.includes("stopped:") || msg.includes("run failed") || msg.includes("run canceled")) return "final";
+  return null;
+}
+
+function buildPhaseMilestones(items: TimelineItem[]): PhaseMilestone[] {
+  const milestones: PhaseMilestone[] = [];
+  for (const item of items) {
+    if (item.kind !== "event") continue;
+    const phase = phaseFromEventText(item.text);
+    if (!phase) continue;
+    milestones.push({
+      id: item.id,
+      phase,
+      text: item.text,
+      at: item.at
+    });
+  }
+  return milestones.slice(-8);
+}
+
+function buildIterationLanes(items: TimelineItem[]): IterationLane[] {
+  const lanes: IterationLane[] = [];
+  for (const row of items) {
+    if (row.kind !== "iteration") continue;
+    const iteration = Number(row.item.iteration ?? 0);
+    const done = Boolean(row.item.done);
+    const at = typeof row.item.timestamp === "string" ? row.item.timestamp : undefined;
+    const actionResults = Array.isArray(row.item.action_results)
+      ? (row.item.action_results as Array<Record<string, unknown>>)
+      : [];
+    const failed = actionResults.filter((x) => !Boolean(x.ok));
+    const firstFailed = failed[0];
+    const summary = firstFailed
+      ? `${String(firstFailed.name ?? "tool")} failed`
+      : done
+        ? "iteration completed"
+        : "iteration in progress";
+    lanes.push({
+      id: row.id,
+      iteration,
+      done,
+      at,
+      actionCount: actionResults.length,
+      failedCount: failed.length,
+      summary
+    });
+  }
+  return lanes.sort((a, b) => a.iteration - b.iteration);
+}
+
+
 export function App() {
   const [runs, setRuns] = useState<RunState[]>([]);
   const [skills, setSkills] = useState<SkillItem[]>([]);
@@ -230,7 +388,7 @@ export function App() {
   const [artifactDownloadingPath, setArtifactDownloadingPath] = useState<string | null>(null);
   const [artifactQuery, setArtifactQuery] = useState("");
   const [artifactSort, setArtifactSort] = useState<"name" | "date" | "size">("date");
-  const [showArtifacts, setShowArtifacts] = useState(true);
+  const [showArtifacts, setShowArtifacts] = useState(false);
   const [pendingMemoryItems, setPendingMemoryItems] = useState<PendingMemoryItem[]>([]);
   const [memoryMetrics, setMemoryMetrics] = useState<MemoryMetrics | null>(null);
   const [memoryLoading, setMemoryLoading] = useState(false);
@@ -239,13 +397,41 @@ export function App() {
   const [policyReloadInfo, setPolicyReloadInfo] = useState<string>("");
   const [policyReloadError, setPolicyReloadError] = useState<string | null>(null);
   const [policyReloading, setPolicyReloading] = useState(false);
+  const [selectedPhase, setSelectedPhase] = useState<RunPhaseKey>("final");
+  const [selectedIteration, setSelectedIteration] = useState<number | null>(null);
+  const [milestonesExpanded, setMilestonesExpanded] = useState(false);
+  const [skillsExpanded, setSkillsExpanded] = useState(false);
+  const [pendingMemoryExpanded, setPendingMemoryExpanded] = useState(false);
+  const [providersExpanded, setProvidersExpanded] = useState(false);
 
   const streamRef = useRef<EventSource | null>(null);
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
 
   const selectedRun = useMemo(() => runs.find((r) => r.run_id === selectedRunId) ?? null, [runs, selectedRunId]);
   const selectedRunSummary = useMemo(() => finalSummary(selectedRun), [selectedRun]);
-  const selectedRunDiagnostics = useMemo(() => extractDiagnostics(timeline), [timeline]);
+  const phaseTimeline = useMemo(() => runPhaseTimeline(timeline, selectedRun), [timeline, selectedRun]);
+  const phaseMilestones = useMemo(() => buildPhaseMilestones(timeline), [timeline]);
+  const iterationLanes = useMemo(() => buildIterationLanes(timeline), [timeline]);
+  const phaseDetails = useMemo(
+    () => phaseTimeline.find((x) => x.key === selectedPhase) ?? phaseTimeline[phaseTimeline.length - 1],
+    [phaseTimeline, selectedPhase]
+  );
+  const currentPhase = useMemo(
+    () => phaseTimeline.find((x) => x.state === "active") ?? phaseTimeline[phaseTimeline.length - 1] ?? null,
+    [phaseTimeline]
+  );
+  const failedPhase = useMemo(
+    () => phaseTimeline.find((x) => x.state === "failed" && x.key !== "final") ?? phaseTimeline.find((x) => x.state === "failed"),
+    [phaseTimeline]
+  );
+  const timelineDisplay = useMemo(() => [...timeline].reverse(), [timeline]);
+  const currentLaneIteration = useMemo(() => {
+    if (iterationLanes.length === 0) return null;
+    const latest = iterationLanes[iterationLanes.length - 1]?.iteration ?? null;
+    const runIter = selectedRun?.iteration ?? 0;
+    if (!runIter || runIter <= 0) return latest;
+    return iterationLanes.some((x) => x.iteration === runIter) ? runIter : latest;
+  }, [iterationLanes, selectedRun?.iteration]);
   const canReloadPolicy = apiClient.hasMemoryAdminKey();
   const isSelectedRunRunning = selectedRun?.status === "running" || pending;
   const visibleArtifacts = useMemo(() => {
@@ -310,10 +496,36 @@ export function App() {
   }, [selectedRunId]);
 
   useEffect(() => {
-    const viewport = timelineViewportRef.current;
-    if (!viewport) return;
-    viewport.scrollTop = viewport.scrollHeight;
-  }, [timeline, selectedRunId]);
+    if (!selectedRun) {
+      setSelectedPhase("final");
+      return;
+    }
+    if (selectedRun.status === "running") {
+      setSelectedPhase("execute");
+      return;
+    }
+    setSelectedPhase("final");
+  }, [selectedRun?.run_id, selectedRun?.status]);
+
+  useEffect(() => {
+    if (iterationLanes.length === 0) {
+      setSelectedIteration(null);
+      return;
+    }
+    setSelectedIteration((prev) => {
+      if (prev !== null && iterationLanes.some((x) => x.iteration === prev)) return prev;
+      return iterationLanes[iterationLanes.length - 1].iteration;
+    });
+  }, [iterationLanes]);
+
+  useEffect(() => {
+    if (!selectedRun || selectedRun.status !== "failed") return;
+    if (failedPhase) {
+      setSelectedPhase(failedPhase.key);
+    } else {
+      setSelectedPhase("final");
+    }
+  }, [selectedRun?.run_id, selectedRun?.status, failedPhase?.key]);
 
   async function refreshSideData() {
     await Promise.all([refreshRunsOnly(), refreshSkills(), refreshHealth(), refreshSystemConfig()]);
@@ -463,6 +675,12 @@ export function App() {
     setTimeline((prev) => [...prev, item]);
   }
 
+  function scrollToIteration(iteration: number) {
+    const target = document.getElementById(`iteration-row-${iteration}`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
   async function onCreateRun() {
     try {
       const trimmedTask = task.trim();
@@ -588,18 +806,21 @@ export function App() {
       <aside className="col-span-12 lg:col-span-3">
         <Card className="h-full border-0 shadow-float">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <Bot className="h-5 w-5 text-primary" /> Softnix Agentic
+            <CardTitle className="flex items-center gap-3 text-xl font-bold tracking-tight">
+              <img src="/softnix-logo.png" alt="Softnix Logo" className="h-9 w-auto object-contain" />
+              <span>Agentic Core</span>
             </CardTitle>
             <div className="text-xs text-muted-foreground">Backend: {apiClient.baseUrl}</div>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <label className="text-xs text-muted-foreground">Task</label>
-              <Input
+              <textarea
                 value={task}
                 onChange={(e) => setTask(e.target.value)}
                 placeholder="Describe your objective, expected output files, and constraints..."
+                rows={4}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 shadow-sm outline-none transition placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
               />
               <div className="rounded-md border border-border bg-secondary/40 p-2">
                 <div className="mb-2 text-[11px] text-muted-foreground">Upload file to workspace</div>
@@ -661,6 +882,7 @@ export function App() {
                     )}
                     onClick={async () => {
                       setSelectedRunId(run.run_id);
+                      setTask(run.task ?? "");
                       await Promise.all([
                         hydrateTimeline(run.run_id),
                         refreshArtifacts(run.run_id),
@@ -686,81 +908,117 @@ export function App() {
             </div>
 
             <div>
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Skills</div>
-              <div className="space-y-1 text-xs text-muted-foreground">
-                {skills.slice(0, 6).map((skill) => (
-                  <div key={skill.path} className="rounded-md bg-secondary px-2 py-1">
-                    {skill.name}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Pending Memory</div>
-              {memoryError ? <div className="mb-2 text-xs text-red-600">{memoryError}</div> : null}
-              {memoryLoading ? <div className="mb-2 text-xs text-muted-foreground">Loading memory...</div> : null}
-              {memoryMetrics ? (
-                <div className="mb-2 rounded-md bg-secondary px-2 py-2 text-[11px] text-muted-foreground">
-                  <div>pending: {memoryMetrics.pending_count}</div>
-                  <div>compact failures: {memoryMetrics.compact_failures}</div>
-                  {memoryMetrics.pending_backlog_alert ? (
-                    <div className="text-red-600">
-                      backlog alert ({memoryMetrics.pending_count}/{memoryMetrics.pending_alert_threshold})
+              <button
+                type="button"
+                className="mb-2 flex w-full items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                onClick={() => setSkillsExpanded((prev) => !prev)}
+              >
+                <span>Skills</span>
+                <span className="flex items-center gap-1">
+                  {skillsExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                  <span>{skills.length}</span>
+                </span>
+              </button>
+              {skillsExpanded ? (
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  {skills.slice(0, 6).map((skill) => (
+                    <div key={skill.path} className="rounded-md bg-secondary px-2 py-1">
+                      {skill.name}
                     </div>
-                  ) : null}
+                  ))}
                 </div>
               ) : null}
-              <div className="space-y-1 text-xs">
-                {pendingMemoryItems.length === 0 && !memoryLoading ? (
-                  <div className="rounded-md bg-secondary px-2 py-2 text-muted-foreground">No pending memory</div>
-                ) : null}
-                {pendingMemoryItems.map((item) => (
-                  <div key={item.pending_key} className="rounded-md border border-border bg-secondary/60 p-2">
-                    <div className="line-clamp-1 font-medium">{item.target_key}</div>
-                    <div className="line-clamp-2 text-[11px] text-muted-foreground">{item.value}</div>
-                    <div className="mt-1 flex items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => onConfirmPending(item.target_key)}
-                        disabled={memoryActionKey === item.target_key}
-                      >
-                        {memoryActionKey === item.target_key ? (
-                          <LoaderCircle className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Check className="h-3 w-3" />
-                        )}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => onRejectPending(item.target_key)}
-                        disabled={memoryActionKey === item.target_key}
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
 
             <div>
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                <Activity className="h-3 w-3" /> Providers
-              </div>
-              <div className="space-y-1 text-xs">
-                {Object.entries(health).map(([name, item]) => {
-                  const badge = providerBadge(item);
-                  return (
-                    <div key={name} className="flex items-center justify-between rounded-md bg-secondary px-2 py-1">
-                      <span>{name}</span>
-                      <Badge variant={badge.variant}>{badge.text}</Badge>
+              <button
+                type="button"
+                className="mb-2 flex w-full items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                onClick={() => setPendingMemoryExpanded((prev) => !prev)}
+              >
+                <span>Pending Memory</span>
+                <span className="flex items-center gap-1">
+                  {pendingMemoryExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                  <span>{pendingMemoryItems.length}</span>
+                </span>
+              </button>
+              {pendingMemoryExpanded ? (
+                <>
+                  {memoryError ? <div className="mb-2 text-xs text-red-600">{memoryError}</div> : null}
+                  {memoryLoading ? <div className="mb-2 text-xs text-muted-foreground">Loading memory...</div> : null}
+                  {memoryMetrics ? (
+                    <div className="mb-2 rounded-md bg-secondary px-2 py-2 text-[11px] text-muted-foreground">
+                      <div>pending: {memoryMetrics.pending_count}</div>
+                      <div>compact failures: {memoryMetrics.compact_failures}</div>
+                      {memoryMetrics.pending_backlog_alert ? (
+                        <div className="text-red-600">
+                          backlog alert ({memoryMetrics.pending_count}/{memoryMetrics.pending_alert_threshold})
+                        </div>
+                      ) : null}
                     </div>
-                  );
-                })}
-              </div>
+                  ) : null}
+                  <div className="space-y-1 text-xs">
+                    {pendingMemoryItems.length === 0 && !memoryLoading ? (
+                      <div className="rounded-md bg-secondary px-2 py-2 text-muted-foreground">No pending memory</div>
+                    ) : null}
+                    {pendingMemoryItems.map((item) => (
+                      <div key={item.pending_key} className="rounded-md border border-border bg-secondary/60 p-2">
+                        <div className="line-clamp-1 font-medium">{item.target_key}</div>
+                        <div className="line-clamp-2 text-[11px] text-muted-foreground">{item.value}</div>
+                        <div className="mt-1 flex items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => onConfirmPending(item.target_key)}
+                            disabled={memoryActionKey === item.target_key}
+                          >
+                            {memoryActionKey === item.target_key ? (
+                              <LoaderCircle className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Check className="h-3 w-3" />
+                            )}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => onRejectPending(item.target_key)}
+                            disabled={memoryActionKey === item.target_key}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+            </div>
+
+            <div>
+              <button
+                type="button"
+                className="mb-2 flex w-full items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                onClick={() => setProvidersExpanded((prev) => !prev)}
+              >
+                <span className="flex items-center gap-2"><Activity className="h-3 w-3" /> Providers</span>
+                <span className="flex items-center gap-1">
+                  {providersExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                  <span>{Object.keys(health).length}</span>
+                </span>
+              </button>
+              {providersExpanded ? (
+                <div className="space-y-1 text-xs">
+                  {Object.entries(health).map(([name, item]) => {
+                    const badge = providerBadge(item);
+                    return (
+                      <div key={name} className="flex items-center justify-between rounded-md bg-secondary px-2 py-1">
+                        <span>{name}</span>
+                        <Badge variant={badge.variant}>{badge.text}</Badge>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
 
             {canReloadPolicy ? (
@@ -824,6 +1082,135 @@ export function App() {
             </div>
           </CardHeader>
           <CardContent>
+            <div className="mb-3 rounded-lg border border-border bg-secondary/40 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Run Flow</div>
+                {currentPhase ? (
+                  <div className="text-[11px] text-muted-foreground">
+                    current: <span className="font-semibold text-sky-700">{currentPhase.label}</span>
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {phaseTimeline.map((phase, idx) => {
+                  const visual = phaseVisualState(phase);
+                  const Icon = phaseIcon(phase.key);
+                  return (
+                    <div key={phase.key} className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPhase(phase.key)}
+                        className={cn(
+                          "relative flex items-center gap-2 rounded-md border px-2 py-1 text-xs transition",
+                          selectedPhase === phase.key ? "border-primary bg-primary/10" : "border-border bg-white hover:bg-secondary"
+                        )}
+                      >
+                        {phase.state === "active" ? (
+                          <motion.span
+                            className="absolute -inset-0.5 rounded-md border border-sky-300"
+                            animate={{ opacity: [0.25, 0.8, 0.25] }}
+                            transition={{ duration: 1.2, repeat: Infinity }}
+                          />
+                        ) : null}
+                        <span className={cn("h-2 w-2 rounded-full", visual.dot)} />
+                        <Icon className={cn("h-3.5 w-3.5", visual.text)} />
+                        <span className={cn("font-medium", visual.text)}>{phase.label}</span>
+                      </button>
+                      {idx < phaseTimeline.length - 1 ? (
+                        <motion.span
+                          className="h-0.5 w-5 rounded-full bg-slate-300"
+                          animate={
+                            phase.state === "active" || phaseTimeline[idx + 1]?.state === "active"
+                              ? { opacity: [0.35, 1, 0.35], backgroundColor: ["#cbd5e1", "#38bdf8", "#cbd5e1"] }
+                              : undefined
+                          }
+                          transition={{ duration: 1.1, repeat: Infinity }}
+                        />
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+              {phaseDetails ? (
+                <div className="mt-3 rounded-md border border-border bg-white px-3 py-2 text-xs">
+                  <div className="flex items-center gap-2 font-semibold">
+                    {phaseDetails.state === "failed" ? <AlertTriangle className="h-3.5 w-3.5 text-rose-600" /> : null}
+                    Phase: {phaseDetails.label}
+                  </div>
+                  <div className="mt-1 text-muted-foreground">{phaseDetails.detail}</div>
+                  {phaseDetails.at ? <div className="mt-1 text-[11px] text-muted-foreground">at {formatTime(phaseDetails.at)}</div> : null}
+                </div>
+              ) : null}
+              {phaseMilestones.length > 0 ? (
+                <div className="mt-2 rounded-md border border-border bg-white px-3 py-2">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between text-[11px] font-semibold text-muted-foreground"
+                    onClick={() => setMilestonesExpanded((prev) => !prev)}
+                  >
+                    <span>Milestones</span>
+                    <span className="flex items-center gap-1">
+                      {milestonesExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                      <span>{phaseMilestones.length}</span>
+                    </span>
+                  </button>
+                  {milestonesExpanded ? (
+                    <div className="mt-1 space-y-1">
+                      {phaseMilestones.map((row) => (
+                        <button
+                          key={row.id}
+                          type="button"
+                          onClick={() => setSelectedPhase(row.phase)}
+                          className="block w-full truncate text-left text-[11px] text-muted-foreground hover:text-foreground"
+                          title={row.text}
+                        >
+                          [{row.phase}] {row.text}
+                          {row.at ? ` · ${formatTime(row.at)}` : ""}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            {iterationLanes.length > 0 ? (
+              <div className="mb-3 rounded-lg border border-border bg-secondary/30 p-3">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Iteration Lanes</div>
+                <div className="flex flex-wrap gap-2">
+                  {iterationLanes.map((lane) => {
+                    const isSelected = selectedIteration === lane.iteration;
+                    const isCurrent = currentLaneIteration === lane.iteration;
+                    const tone = lane.failedCount > 0 ? "text-rose-700" : lane.done ? "text-emerald-700" : "text-sky-700";
+                    return (
+                      <button
+                        key={lane.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedIteration(lane.iteration);
+                          scrollToIteration(lane.iteration);
+                        }}
+                        className={cn(
+                          "rounded-md border px-2 py-1 text-left text-xs transition",
+                          isCurrent ? "border-emerald-500 bg-emerald-50/70" : "border-border bg-white hover:bg-secondary",
+                          isSelected ? "ring-2 ring-primary/40" : ""
+                        )}
+                      >
+                        <div className="flex items-center gap-1 font-semibold">
+                          Iter {lane.iteration}
+                          {isCurrent ? <span className="text-[10px] text-emerald-700">(current)</span> : null}
+                        </div>
+                        <div className={cn("text-[11px]", tone)}>
+                          actions={lane.actionCount} fail={lane.failedCount}
+                        </div>
+                        <div className="max-w-[180px] truncate text-[11px] text-muted-foreground">{lane.summary}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
             {selectedRunSummary ? (
               <div
                 className={cn(
@@ -835,42 +1222,24 @@ export function App() {
               >
                 <div className="font-semibold">{selectedRunSummary.title}</div>
                 <div className="text-xs">{selectedRunSummary.detail}</div>
-              </div>
-            ) : null}
-            {selectedRun ? (
-              <div className="mb-3 rounded-lg border border-border bg-secondary/50 px-3 py-2 text-xs">
-                <div className="mb-1 font-semibold">Run Diagnostics</div>
-                <div className="text-muted-foreground">run_id: {selectedRun.run_id}</div>
-                <div className="text-muted-foreground">
-                  status: {runOutcome(selectedRun).label} / stop_reason: {renderStopReason(selectedRun.stop_reason)}
-                </div>
-                {selectedRunDiagnostics.runtimeProfile && selectedRunDiagnostics.runtimeImage ? (
-                  <div className="text-muted-foreground">
-                    runtime: {selectedRunDiagnostics.runtimeProfile} ({selectedRunDiagnostics.runtimeImage})
-                  </div>
-                ) : null}
-                {typeof selectedRunDiagnostics.lastIteration === "number" ? (
-                  <div className="text-muted-foreground">
-                    last iteration: {selectedRunDiagnostics.lastIteration} ({selectedRunDiagnostics.lastIterationDone ? "done" : "continue"})
-                  </div>
-                ) : null}
-                {selectedRunDiagnostics.noProgressSignature ? (
-                  <div className="text-red-700">
-                    no-progress: sig={selectedRunDiagnostics.noProgressSignature}, actions={selectedRunDiagnostics.noProgressActions}
+                {failedPhase ? (
+                  <div className="mt-1 text-xs">
+                    failure pinpoint: <span className="font-semibold">{failedPhase.label}</span>
                   </div>
                 ) : null}
               </div>
             ) : null}
             <ScrollArea ref={timelineViewportRef} className="h-[76vh] space-y-3 pr-2">
               <AnimatePresence>
-                {timeline.map((item) => (
-                  <motion.div key={item.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mb-3">
-                    {item.kind === "event" ? (
-                      <MessageBubble role="system" timestamp={formatTime(item.at)}>
-                        {item.text}
-                      </MessageBubble>
-                    ) : null}
-
+                {timelineDisplay.map((item) => (
+                  <motion.div
+                    key={item.id}
+                    id={item.kind === "iteration" ? `iteration-row-${Number(item.item.iteration ?? 0)}` : undefined}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className="mb-3"
+                  >
                     {item.kind === "state" ? (
                       <MessageBubble role="assistant" timestamp={formatTime(item.state.updated_at)}>
                         <ThinkingBlock
@@ -884,7 +1253,14 @@ export function App() {
                         role="assistant"
                         timestamp={formatTime(typeof item.item.timestamp === "string" ? item.item.timestamp : undefined)}
                       >
-                        <div className="space-y-3">
+                        <div
+                          className={cn(
+                            "space-y-3",
+                            selectedIteration !== null && Number(item.item.iteration ?? 0) === selectedIteration
+                              ? "rounded-md border border-primary/30 bg-primary/5 p-2"
+                              : ""
+                          )}
+                        >
                           <MarkdownStream content={String(item.item.output ?? "")} />
                           {Array.isArray(item.item.action_results)
                             ? (item.item.action_results as Array<Record<string, unknown>>).map((tool, idx) => (
